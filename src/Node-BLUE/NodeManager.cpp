@@ -69,14 +69,6 @@ NodeLoader::NodeLoader(std::string nodeNamespace, std::string type, std::string 
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 }
 
 NodeLoader::~NodeLoader()
@@ -94,14 +86,6 @@ NodeLoader::~NodeLoader()
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 }
 
@@ -130,7 +114,7 @@ NodeManager::~NodeManager()
 	_nodeLoaders.clear();
 }
 
-Flows::PINode NodeManager::getNode(std::string& id)
+Flows::PINode NodeManager::getNode(const std::string& id)
 {
 	try
 	{
@@ -149,14 +133,6 @@ Flows::PINode NodeManager::getNode(std::string& id)
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 	return Flows::PINode();
 }
@@ -225,6 +201,9 @@ std::vector<NodeManager::PNodeInfo> NodeManager::getNodeInfo()
 					}
 					nodeInfo->version = headerIterator->second->stringValue;
 
+                    headerIterator = header->structValue->find("coreNode");
+                    if(headerIterator != header->structValue->end()) nodeInfo->coreNode = headerIterator->second->booleanValue;
+
 					headerIterator = header->structValue->find("maxThreadCount");
 					if(headerIterator == header->structValue->end())
 					{
@@ -242,28 +221,12 @@ std::vector<NodeManager::PNodeInfo> NodeManager::getNodeInfo()
 				{
 					GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, "Error opening file " + path + ": " + ex.what());
 				}
-				catch(BaseLib::Exception& ex)
-				{
-					GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, "Error opening file " + path + ": " + ex.what());
-				}
-				catch(...)
-				{
-					GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, "Error opening file " + path);
-				}
 			}
 		}
 	}
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 	return nodeInfoVector;
 }
@@ -280,7 +243,7 @@ std::string NodeManager::getNodeLocales(std::string& language)
 		for(auto& directory : directories)
 		{
 			std::string localePath = GD::bl->settings.nodeBluePath() + "nodes/" + directory + "/locales/" + language + "/";
-			if(!GD::bl->io.directoryExists(localePath)) continue;
+			if(!BaseLib::Io::directoryExists(localePath)) continue;
 			std::vector<std::string> files = GD::bl->io.getFiles(localePath);
 			if(files.empty()) continue;
 			for(auto& file : files)
@@ -288,10 +251,23 @@ std::string NodeManager::getNodeLocales(std::string& language)
 				std::string path = localePath + file;
 				try
 				{
-					std::string content = GD::bl->io.getFileContent(path);
+				    if(file.size() > 5 && file.compare(file.size() - 5, 5, ".html") == 0) continue;
+
+					std::string content = BaseLib::Io::getFileContent(path);
 					BaseLib::HelperFunctions::trim(content);
 					BaseLib::PVariable json = jsonDecoder->decode(content); //Check for JSON errors
-					if(json->structValue->empty()) continue;
+					if(json->structValue->empty() || json->structValue->begin()->second->structValue->empty()) continue;
+
+					auto htmlPath = path;
+					if(htmlPath.size() > 5 && htmlPath.compare(htmlPath.size() - 5, 5, ".json") == 0) htmlPath = htmlPath.substr(0, htmlPath.size() - 5);
+					htmlPath.append(".help.html");
+					if(BaseLib::Io::fileExists(htmlPath))
+                    {
+					    std::string help = BaseLib::Io::getFileContent(htmlPath);
+					    json->structValue->begin()->second->structValue->begin()->second->structValue->emplace("help", std::make_shared<BaseLib::Variable>(help));
+					    BaseLib::Rpc::JsonEncoder::encode(json, content);
+                    }
+
 					if(locales.size() + content.size() > locales.capacity()) locales.reserve(locales.capacity() + content.size() + 8192);
 					if(!firstFile) locales += ",";
 					else firstFile = false;
@@ -300,14 +276,6 @@ std::string NodeManager::getNodeLocales(std::string& language)
 				catch(const std::exception& ex)
 				{
 					GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, "Error opening file " + path + ": " + ex.what());
-				}
-				catch(BaseLib::Exception& ex)
-				{
-					GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, "Error opening file " + path + ": " + ex.what());
-				}
-				catch(...)
-				{
-					GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, "Error opening file " + path);
 				}
 			}
 		}
@@ -318,18 +286,10 @@ std::string NodeManager::getNodeLocales(std::string& language)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 	return "";
 }
 
-int32_t NodeManager::loadNode(std::string nodeNamespace, std::string type, std::string id, Flows::PINode& node)
+int32_t NodeManager::loadNode(const std::string& nodeNamespace, const std::string& type, const std::string& id, Flows::PINode& node)
 {
 	try
 	{
@@ -424,18 +384,10 @@ int32_t NodeManager::loadNode(std::string nodeNamespace, std::string type, std::
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 	return -1;
 }
 
-int32_t NodeManager::unloadNode(std::string id)
+int32_t NodeManager::unloadNode(const std::string& id)
 {
 	try
 	{
@@ -484,14 +436,6 @@ int32_t NodeManager::unloadNode(std::string id)
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 	return -1;
 }

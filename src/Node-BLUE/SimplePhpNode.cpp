@@ -28,9 +28,10 @@
  * files in the program, then also delete it here.
 */
 
+#include "SimplePhpNode.h"
+
 #ifndef NO_SCRIPTENGINE
 
-#include "SimplePhpNode.h"
 #include "../GD/GD.h"
 
 namespace Homegear
@@ -64,14 +65,6 @@ void SimplePhpNode::input(Flows::PNodeInfo nodeInfo, uint32_t index, Flows::PVar
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 }
 

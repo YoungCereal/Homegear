@@ -65,14 +65,6 @@ ScriptEngineClient::ScriptEngineClient() : IQueue(GD::bl.get(), 2, 100000)
     _out.init(GD::bl.get());
     _out.setPrefix("Script Engine (" + std::to_string(getpid()) + "): ");
 
-#ifdef DEBUGSESOCKET
-    std::string socketLogfile = GD::bl->settings.logfilePath() + "homegear-socket-client-" + std::to_string((uint32_t)getpid()) + ".pcap";
-    BaseLib::Io::deleteFile(socketLogfile);
-    _socketOutput.open(socketLogfile, std::ios::app | std::ios::binary);
-    std::vector<uint8_t> buffer{ 0xa1, 0xb2, 0xc3, 0xd4, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0x7F, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0xe4 };
-    _socketOutput.write((char*)buffer.data(), buffer.size());
-#endif
-
     _dummyClientInfo.reset(new BaseLib::RpcClientInfo());
 
     _binaryRpc = std::unique_ptr<BaseLib::Rpc::BinaryRpc>(new BaseLib::Rpc::BinaryRpc(GD::bl.get()));
@@ -82,6 +74,7 @@ ScriptEngineClient::ScriptEngineClient() : IQueue(GD::bl.get(), 2, 100000)
     _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("devTest", std::bind(&ScriptEngineClient::devTest, this, std::placeholders::_1)));
     _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("reload", std::bind(&ScriptEngineClient::reload, this, std::placeholders::_1)));
     _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("shutdown", std::bind(&ScriptEngineClient::shutdown, this, std::placeholders::_1)));
+    _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("lifetick", std::bind(&ScriptEngineClient::lifetick, this, std::placeholders::_1)));
     _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("stopDevices", std::bind(&ScriptEngineClient::stopDevices, this, std::placeholders::_1)));
     _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("executeScript", std::bind(&ScriptEngineClient::executeScript, this, std::placeholders::_1)));
     _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(BaseLib::PArray& parameters)>>("scriptCount", std::bind(&ScriptEngineClient::scriptCount, this, std::placeholders::_1)));
@@ -102,9 +95,6 @@ ScriptEngineClient::~ScriptEngineClient()
     dispose(true);
     if(_maintenanceThread.joinable()) _maintenanceThread.join();
     if(_watchdogThread.joinable()) _watchdogThread.join();
-#ifdef DEBUGSESOCKET
-    _socketOutput.close();
-#endif
 }
 
 void ScriptEngineClient::stopEventThreads()
@@ -120,7 +110,7 @@ void ScriptEngineClient::dispose(bool broadcastShutdown)
 {
     try
     {
-        BaseLib::PArray eventData(new BaseLib::Array{BaseLib::PVariable(new BaseLib::Variable(0)), BaseLib::PVariable(new BaseLib::Variable(-1)), BaseLib::PVariable(new BaseLib::Variable(BaseLib::PArray(new BaseLib::Array{BaseLib::PVariable(new BaseLib::Variable(std::string("DISPOSING")))}))), BaseLib::PVariable(new BaseLib::Variable(BaseLib::PArray(new BaseLib::Array{BaseLib::PVariable(new BaseLib::Variable(true))})))});
+        BaseLib::PArray eventData(new BaseLib::Array{std::make_shared<BaseLib::Variable>(0), std::make_shared<BaseLib::Variable>(-1), std::make_shared<BaseLib::Variable>(BaseLib::PArray(new BaseLib::Array{std::make_shared<BaseLib::Variable>(std::string("DISPOSING"))})), std::make_shared<BaseLib::Variable>(BaseLib::PArray(new BaseLib::Array{std::make_shared<BaseLib::Variable>(true)}))});
 
         GD::bl->shuttingDown = true;
         if(broadcastShutdown) broadcastEvent(eventData);
@@ -163,159 +153,11 @@ void ScriptEngineClient::dispose(bool broadcastShutdown)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
     }
 }
-
-#ifdef DEBUGSESOCKET
-void ScriptEngineClient::socketOutput(int32_t packetId, bool clientRequest, bool request, std::vector<char> data)
-{
-    try
-    {
-        int64_t time = BaseLib::HelperFunctions::getTimeMicroseconds();
-        int32_t timeSeconds = time / 1000000;
-        int32_t timeMicroseconds = time % 1000000;
-
-        uint32_t length = 20 + 8 + data.size();
-
-        std::vector<uint8_t> buffer;
-        buffer.reserve(length);
-        buffer.push_back((uint8_t)(timeSeconds >> 24));
-        buffer.push_back((uint8_t)(timeSeconds >> 16));
-        buffer.push_back((uint8_t)(timeSeconds >> 8));
-        buffer.push_back((uint8_t)timeSeconds);
-
-        buffer.push_back((uint8_t)(timeMicroseconds >> 24));
-        buffer.push_back((uint8_t)(timeMicroseconds >> 16));
-        buffer.push_back((uint8_t)(timeMicroseconds >> 8));
-        buffer.push_back((uint8_t)timeMicroseconds);
-
-        buffer.push_back((uint8_t)(length >> 24)); //incl_len
-        buffer.push_back((uint8_t)(length >> 16));
-        buffer.push_back((uint8_t)(length >> 8));
-        buffer.push_back((uint8_t)length);
-
-        buffer.push_back((uint8_t)(length >> 24)); //orig_len
-        buffer.push_back((uint8_t)(length >> 16));
-        buffer.push_back((uint8_t)(length >> 8));
-        buffer.push_back((uint8_t)length);
-
-        //{{{ IPv4 header
-            buffer.push_back(0x45); //Version 4 (0100....); Header length 20 (....0101)
-            buffer.push_back(0); //Differentiated Services Field
-
-            buffer.push_back((uint8_t)(length >> 8)); //Length
-            buffer.push_back((uint8_t)length);
-
-            buffer.push_back((uint8_t)((packetId % 65536) >> 8)); //Identification
-            buffer.push_back((uint8_t)(packetId % 65536));
-
-            buffer.push_back(0); //Flags: 0 (000.....); Fragment offset 0 (...00000 00000000)
-            buffer.push_back(0);
-
-            buffer.push_back(0x80); //TTL
-
-            buffer.push_back(17); //Protocol UDP
-
-            buffer.push_back(0); //Header checksum
-            buffer.push_back(0);
-
-            int32_t clientId = getpid();
-            if(request)
-            {
-                if(clientRequest)
-                {
-                    buffer.push_back(0x80 | (uint8_t)(clientId >> 24)); //Source
-                    buffer.push_back((uint8_t)(clientId >> 16));
-                    buffer.push_back((uint8_t)(clientId >> 8));
-                    buffer.push_back((uint8_t)clientId);
-
-                    buffer.push_back(2); //Destination
-                    buffer.push_back(2);
-                    buffer.push_back(2);
-                    buffer.push_back(2);
-                }
-                else
-                {
-                    buffer.push_back(1); //Source
-                    buffer.push_back(1);
-                    buffer.push_back(1);
-                    buffer.push_back(1);
-
-                    buffer.push_back(0x80 | (uint8_t)(clientId >> 24)); //Destination
-                    buffer.push_back((uint8_t)(clientId >> 16));
-                    buffer.push_back((uint8_t)(clientId >> 8));
-                    buffer.push_back((uint8_t)clientId);
-                }
-            }
-            else
-            {
-                if(clientRequest)
-                {
-                    buffer.push_back(2); //Source
-                    buffer.push_back(2);
-                    buffer.push_back(2);
-                    buffer.push_back(2);
-
-                    buffer.push_back(0x80 | (uint8_t)(clientId >> 24)); //Destination
-                    buffer.push_back((uint8_t)(clientId >> 16));
-                    buffer.push_back((uint8_t)(clientId >> 8));
-                    buffer.push_back((uint8_t)clientId);
-                }
-                else
-                {
-                    buffer.push_back(0x80 | (uint8_t)(clientId >> 24)); //Source
-                    buffer.push_back((uint8_t)(clientId >> 16));
-                    buffer.push_back((uint8_t)(clientId >> 8));
-                    buffer.push_back((uint8_t)clientId);
-
-                    buffer.push_back(1); //Destination
-                    buffer.push_back(1);
-                    buffer.push_back(1);
-                    buffer.push_back(1);
-                }
-            }
-        // }}}
-        // {{{ UDP header
-            buffer.push_back(0); //Source port
-            buffer.push_back(1);
-
-            buffer.push_back((uint8_t)(clientId >> 8)); //Destination port
-            buffer.push_back((uint8_t)clientId);
-
-            length -= 20;
-            buffer.push_back((uint8_t)(length >> 8)); //Length
-            buffer.push_back((uint8_t)length);
-
-            buffer.push_back(0); //Checksum
-            buffer.push_back(0);
-        // }}}
-
-        buffer.insert(buffer.end(), data.begin(), data.end());
-
-        std::lock_guard<std::mutex> socketOutputGuard(_socketOutputMutex);
-        _socketOutput.write((char*)buffer.data(), buffer.size());
-    }
-    catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-}
-#endif
 
 void ScriptEngineClient::start()
 {
@@ -440,19 +282,6 @@ void ScriptEngineClient::start()
                         processedBytes += _binaryRpc->process(buffer.data() + processedBytes, bytesRead - processedBytes);
                         if(_binaryRpc->isFinished())
                         {
-#ifdef DEBUGSESOCKET
-                            if(_binaryRpc->getType() == BaseLib::Rpc::BinaryRpc::Type::request)
-                            {
-                                std::string methodName;
-                                BaseLib::PArray request = _rpcDecoder->decodeRequest(_binaryRpc->getData(), methodName);
-                                socketOutput(request->at(0)->integerValue, false, true, _binaryRpc->getData());
-                            }
-                            else
-                            {
-                                BaseLib::PVariable response = _rpcDecoder->decodeResponse(_binaryRpc->getData());
-                                socketOutput(response->arrayValue->at(1)->integerValue, true, false, _binaryRpc->getData());
-                            }
-#endif
                             if(_binaryRpc->getType() == BaseLib::Rpc::BinaryRpc::Type::request)
                             {
                                 std::string methodName;
@@ -472,15 +301,11 @@ void ScriptEngineClient::start()
                 }
                 catch(BaseLib::Rpc::BinaryRpcException& ex)
                 {
-                    _out.printError("Error processing packet: " + ex.what());
+                    _out.printError("Error processing packet: " + std::string(ex.what()));
                     _binaryRpc->reset();
                 }
             }
             catch(const std::exception& ex)
-            {
-                _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-            }
-            catch(BaseLib::Exception& ex)
             {
                 _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
             }
@@ -492,10 +317,6 @@ void ScriptEngineClient::start()
         buffer.clear();
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -535,10 +356,6 @@ void ScriptEngineClient::sendScriptFinished(int32_t exitCode)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -560,10 +377,6 @@ void ScriptEngineClient::registerClient()
         _out.printInfo("Info: Client registered to server.");
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -596,7 +409,7 @@ void ScriptEngineClient::processQueueEntry(int32_t index, std::shared_ptr<BaseLi
                 if(localMethodIterator == _localRpcMethods.end())
                 {
                     _out.printError("Warning: RPC method not found: " + queueEntry->methodName);
-                    BaseLib::PVariable error = BaseLib::Variable::createError(-32601, ": Requested method not found.");
+                    BaseLib::PVariable error = BaseLib::Variable::createError(-32601, "Requested method not found in script engine client.");
                     if(queueEntry->parameters->at(1)->booleanValue) sendResponse(queueEntry->parameters->at(0), error);
                     return;
                 }
@@ -619,10 +432,6 @@ void ScriptEngineClient::processQueueEntry(int32_t index, std::shared_ptr<BaseLi
                 if(queueEntry->parameters->at(1)->booleanValue) sendResponse(queueEntry->parameters->at(0), result);
             }
             catch(const std::exception& ex)
-            {
-                _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-            }
-            catch(BaseLib::Exception& ex)
             {
                 _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
             }
@@ -716,10 +525,6 @@ void ScriptEngineClient::processQueueEntry(int32_t index, std::shared_ptr<BaseLi
             {
                 _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
             }
-            catch(BaseLib::Exception& ex)
-            {
-                _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-            }
             catch(...)
             {
                 _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -729,10 +534,6 @@ void ScriptEngineClient::processQueueEntry(int32_t index, std::shared_ptr<BaseLi
         }
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -758,10 +559,6 @@ void ScriptEngineClient::sendOutput(std::string output, bool error)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -782,10 +579,6 @@ void ScriptEngineClient::sendHeaders(BaseLib::PVariable headers)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -801,10 +594,6 @@ BaseLib::PVariable ScriptEngineClient::callMethod(std::string methodName, BaseLi
         return sendRequest(globals->id, globals->peerId, globals->user, globals->language, methodName, parameters->arrayValue, wait);
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -834,10 +623,6 @@ BaseLib::PVariable ScriptEngineClient::send(std::vector<char>& data)
         }
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -897,9 +682,6 @@ BaseLib::PVariable ScriptEngineClient::sendRequest(int32_t scriptId, uint64_t pe
             }
         }
 
-#ifdef DEBUGSESOCKET
-        socketOutput(packetId, true, true, data);
-#endif
         BaseLib::PVariable result = send(data);
         if(result->errorStruct || !wait)
         {
@@ -944,10 +726,6 @@ BaseLib::PVariable ScriptEngineClient::sendRequest(int32_t scriptId, uint64_t pe
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -989,9 +767,6 @@ BaseLib::PVariable ScriptEngineClient::sendGlobalRequest(std::string methodName,
             return BaseLib::Variable::createError(-32500, "Unknown application error.");
         }
 
-#ifdef DEBUGSESOCKET
-        socketOutput(packetId, true, true, data);
-#endif
         BaseLib::PVariable result = send(data);
         if(result->errorStruct)
         {
@@ -1032,10 +807,6 @@ BaseLib::PVariable ScriptEngineClient::sendGlobalRequest(std::string methodName,
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1050,16 +821,9 @@ void ScriptEngineClient::sendResponse(BaseLib::PVariable& packetId, BaseLib::PVa
         BaseLib::PVariable array(new BaseLib::Variable(BaseLib::PArray(new BaseLib::Array{packetId, variable})));
         std::vector<char> data;
         _rpcEncoder->encodeResponse(array, data);
-#ifdef DEBUGSESOCKET
-        socketOutput(packetId->integerValue, false, false, data);
-#endif
         send(data);
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1121,10 +885,6 @@ void ScriptEngineClient::collectGarbage()
         }
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1265,6 +1025,7 @@ void ScriptEngineClient::runScript(int32_t id, PScriptInfo scriptInfo)
                 BaseLib::Base64::encode(std::vector<uint8_t>{0, 1, 2, 3, 4, 5}, globals->token);
                 std::shared_ptr<PhpEvents> phpEvents = std::make_shared<PhpEvents>(globals->token, globals->outputCallback, globals->rpcCallback);
                 phpEvents->setPeerId(static_cast<uint64_t>(scriptInfo->peerId));
+                if(type == ScriptInfo::ScriptType::statefulNode) phpEvents->setNodeId(scriptInfo->nodeInfo->structValue->at("id")->stringValue);
                 std::lock_guard<std::mutex> eventsGuard(PhpEvents::eventsMapMutex);
                 PhpEvents::eventsMap.emplace(id, phpEvents);
             }
@@ -1367,10 +1128,6 @@ void ScriptEngineClient::runScript(int32_t id, PScriptInfo scriptInfo)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1419,6 +1176,13 @@ void ScriptEngineClient::runNode(int32_t id, PScriptInfo scriptInfo)
                         if(!nodeInfo->response->booleanValue) stop = true;
                     }
                     else if(nodeInfo->methodName == "start" && !nodeInfo->response->booleanValue) stop = true;
+                    else if(nodeInfo->methodName == "stop")
+                    {
+                        //Cause `pollEvent()` to return
+                        std::lock_guard<std::mutex> eventMapGuard(PhpEvents::eventsMapMutex);
+                        auto event = PhpEvents::eventsMap.find(id);
+                        if(event != PhpEvents::eventsMap.end()) event->second->stop();
+                    }
                     else if(nodeInfo->methodName == "waitForStop")
                     {
                         _nodesStopped = true;
@@ -1465,10 +1229,6 @@ void ScriptEngineClient::runNode(int32_t id, PScriptInfo scriptInfo)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1510,6 +1270,13 @@ void ScriptEngineClient::runDevice(int32_t id, PScriptInfo scriptInfo)
                     if(!deviceInfo->response->booleanValue) stop = true;
                 }
                 else if(deviceInfo->methodName == "start" && !deviceInfo->response->booleanValue) stop = true;
+                else if(deviceInfo->methodName == "stop")
+                {
+                    //Cause `pollEvent()` to return
+                    std::lock_guard<std::mutex> eventMapGuard(PhpEvents::eventsMapMutex);
+                    auto event = PhpEvents::eventsMap.find(id);
+                    if(event != PhpEvents::eventsMap.end()) event->second->stop();
+                }
                 else if(deviceInfo->methodName == "waitForStop")
                 {
                     stop = true;
@@ -1525,10 +1292,6 @@ void ScriptEngineClient::runDevice(int32_t id, PScriptInfo scriptInfo)
         }
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1607,10 +1370,6 @@ void ScriptEngineClient::scriptThread(int32_t id, PScriptInfo scriptInfo, bool s
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1647,12 +1406,6 @@ void ScriptEngineClient::checkSessionIdThread(std::string sessionId, std::string
             }
         }
         catch(const std::exception& ex)
-        {
-            GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-            ts_free_thread();
-            return;
-        }
-        catch(BaseLib::Exception& ex)
         {
             GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
             ts_free_thread();
@@ -1707,10 +1460,6 @@ void ScriptEngineClient::checkSessionIdThread(std::string sessionId, std::string
     {
         GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1753,10 +1502,6 @@ void ScriptEngineClient::watchdog()
         {
             _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
         }
-        catch(BaseLib::Exception& ex)
-        {
-            _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-        }
         catch(...)
         {
             _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1784,10 +1529,6 @@ BaseLib::PVariable ScriptEngineClient::reload(BaseLib::PArray& parameters)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1803,13 +1544,35 @@ BaseLib::PVariable ScriptEngineClient::shutdown(BaseLib::PArray& parameters)
         if(_maintenanceThread.joinable()) _maintenanceThread.join();
         _maintenanceThread = std::thread(&ScriptEngineClient::dispose, this, true);
 
-        return BaseLib::PVariable(new BaseLib::Variable());
+        return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+    catch(...)
+    {
+        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
+    }
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+
+BaseLib::PVariable ScriptEngineClient::lifetick(BaseLib::PArray& parameters)
+{
+    try
+    {
+        for(int32_t i = 0; i < _queueCount; i++)
+        {
+            if(queueSize(i) > 1000)
+            {
+                _out.printError("Error in lifetick: More than 1000 items are queued in queue number " + std::to_string(i));
+                return std::make_shared<BaseLib::Variable>(false);
+            }
+        }
+
+        return std::make_shared<BaseLib::Variable>(true);
+    }
+    catch(const std::exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1870,10 +1633,6 @@ BaseLib::PVariable ScriptEngineClient::stopDevices(BaseLib::PArray& parameters)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1904,7 +1663,7 @@ BaseLib::PVariable ScriptEngineClient::executeScript(BaseLib::PArray& parameters
         else if(type == ScriptInfo::ScriptType::web)
         {
             if(parameters->at(2)->stringValue.empty()) return BaseLib::Variable::createError(-1, "Path is empty.");
-            scriptInfo.reset(new ScriptInfo(type, parameters->at(2)->stringValue, parameters->at(3)->stringValue, parameters->at(4)->stringValue, parameters->at(5), parameters->at(6)));
+            scriptInfo.reset(new ScriptInfo(GD::bl.get(), type, parameters->at(2)->stringValue, parameters->at(3)->stringValue, parameters->at(4)->stringValue, parameters->at(5), parameters->at(6), parameters->at(7)));
 
             if(scriptInfo->script.empty() && !GD::bl->io.fileExists(scriptInfo->fullPath))
             {
@@ -1999,10 +1758,6 @@ BaseLib::PVariable ScriptEngineClient::executeScript(BaseLib::PArray& parameters
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2029,10 +1784,6 @@ BaseLib::PVariable ScriptEngineClient::devTest(BaseLib::PArray& parameters)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2049,10 +1800,6 @@ BaseLib::PVariable ScriptEngineClient::scriptCount(BaseLib::PArray& parameters)
         return std::make_shared<BaseLib::Variable>((int32_t) _scriptThreads.size());
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2083,10 +1830,6 @@ BaseLib::PVariable ScriptEngineClient::getRunningScripts(BaseLib::PArray& parame
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2111,10 +1854,6 @@ BaseLib::PVariable ScriptEngineClient::checkSessionId(BaseLib::PArray& parameter
         return std::make_shared<BaseLib::Variable>(result);
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2184,10 +1923,6 @@ BaseLib::PVariable ScriptEngineClient::executePhpNodeMethod(BaseLib::PArray& par
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2253,10 +1988,6 @@ BaseLib::PVariable ScriptEngineClient::executeDeviceMethod(BaseLib::PArray& para
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2299,10 +2030,6 @@ BaseLib::PVariable ScriptEngineClient::broadcastEvent(BaseLib::PArray& parameter
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2331,10 +2058,6 @@ BaseLib::PVariable ScriptEngineClient::broadcastNewDevices(BaseLib::PArray& para
         return BaseLib::PVariable(new BaseLib::Variable());
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2369,10 +2092,6 @@ BaseLib::PVariable ScriptEngineClient::broadcastDeleteDevices(BaseLib::PArray& p
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2404,10 +2123,6 @@ BaseLib::PVariable ScriptEngineClient::broadcastUpdateDevice(BaseLib::PArray& pa
         return BaseLib::PVariable(new BaseLib::Variable());
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }

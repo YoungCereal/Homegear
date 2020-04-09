@@ -1,3 +1,5 @@
+#include <memory>
+
 /* Copyright 2013-2019 Homegear GmbH
  *
  * Homegear is free software: you can redistribute it and/or modify
@@ -46,7 +48,6 @@ Miscellaneous::Miscellaneous(BaseLib::SharedObjects* bl, BaseLib::Systems::IFami
 
 Miscellaneous::~Miscellaneous()
 {
-
 }
 
 void Miscellaneous::dispose()
@@ -63,7 +64,7 @@ void Miscellaneous::reloadRpcDevices()
 
 std::shared_ptr<BaseLib::Systems::ICentral> Miscellaneous::initializeCentral(uint32_t deviceId, int32_t address, std::string serialNumber)
 {
-	return std::shared_ptr<MiscCentral>(new MiscCentral(deviceId, serialNumber, this));
+	return std::make_shared<MiscCentral>(deviceId, serialNumber, this);
 }
 
 void Miscellaneous::createCentral()
@@ -76,14 +77,6 @@ void Miscellaneous::createCentral()
 	catch(const std::exception& ex)
     {
     	GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-    	GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-    	GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
     }
 }
 
@@ -115,14 +108,6 @@ PVariable Miscellaneous::getPairingInfo()
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 	return Variable::createError(-32500, "Unknown application error.");
 }

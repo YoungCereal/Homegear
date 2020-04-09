@@ -32,6 +32,8 @@
 #include "../User/User.h"
 #include "../GD/GD.h"
 
+#include <sys/stat.h>
+
 namespace Homegear
 {
 
@@ -51,7 +53,6 @@ void DatabaseController::dispose()
     _disposing = true;
     stopQueue(0);
     _db.dispose();
-    _systemVariables.clear();
     _metadata.clear();
 }
 
@@ -62,8 +63,10 @@ void DatabaseController::init()
         GD::out.printCritical("Critical: Could not initialize database controller, because base library is not initialized.");
         return;
     }
+
     _rpcDecoder = std::unique_ptr<BaseLib::Rpc::RpcDecoder>(new BaseLib::Rpc::RpcDecoder(GD::bl.get(), false, false));
     _rpcEncoder = std::unique_ptr<BaseLib::Rpc::RpcEncoder>(new BaseLib::Rpc::RpcEncoder(GD::bl.get(), false, true));
+
     startQueue(0, true, 1, 0, SCHED_OTHER);
 }
 
@@ -96,7 +99,7 @@ void DatabaseController::initializeDatabase()
         _db.executeCommand("CREATE INDEX IF NOT EXISTS parametersIndex ON parameters (parameterID, peerID, parameterSetType, peerChannel, remotePeer, remoteChannel, parameterName, specialType)");
         _db.executeCommand("CREATE TABLE IF NOT EXISTS metadata (objectID TEXT, dataID TEXT, serializedObject BLOB)");
         _db.executeCommand("CREATE INDEX IF NOT EXISTS metadataIndex ON metadata (objectID, dataID)");
-        _db.executeCommand("CREATE TABLE IF NOT EXISTS systemVariables (variableID TEXT PRIMARY KEY UNIQUE NOT NULL, serializedObject BLOB, room INTEGER, categories TEXT, flags INTEGER)");
+        _db.executeCommand("CREATE TABLE IF NOT EXISTS systemVariables (variableID TEXT PRIMARY KEY UNIQUE NOT NULL, serializedObject BLOB, room INTEGER, categories TEXT, flags INTEGER, roles TEXT)");
         _db.executeCommand("CREATE INDEX IF NOT EXISTS systemVariablesIndex ON systemVariables (variableID)");
         _db.executeCommand("CREATE TABLE IF NOT EXISTS devices (deviceID INTEGER PRIMARY KEY UNIQUE, address INTEGER NOT NULL, serialNumber TEXT NOT NULL, deviceType INTEGER NOT NULL, deviceFamily INTEGER NOT NULL)");
         _db.executeCommand("CREATE INDEX IF NOT EXISTS devicesIndex ON devices (deviceID, address, deviceType, deviceFamily)");
@@ -106,6 +109,8 @@ void DatabaseController::initializeDatabase()
         _db.executeCommand("CREATE INDEX IF NOT EXISTS licenseVariablesIndex ON licenseVariables (variableID, moduleID, variableIndex)");
         _db.executeCommand("CREATE TABLE IF NOT EXISTS users (userID INTEGER PRIMARY KEY UNIQUE, name TEXT NOT NULL, password BLOB NOT NULL, salt BLOB NOT NULL, groups BLOB NOT NULL, metadata BLOB NOT NULL, keyIndex1 INTEGER, keyIndex2 INTEGER)");
         _db.executeCommand("CREATE INDEX IF NOT EXISTS usersIndex ON users (userID, name)");
+        _db.executeCommand("CREATE TABLE IF NOT EXISTS userData (userID INTEGER, component TEXT, key TEXT, value BLOB)");
+        _db.executeCommand("CREATE INDEX IF NOT EXISTS userDataIndex ON userData (userID, component, key)");
         _db.executeCommand("CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY UNIQUE, translations BLOB NOT NULL, acl BLOB NOT NULL)");
         _db.executeCommand("CREATE INDEX IF NOT EXISTS groupsIndex ON groups (id)");
         _db.executeCommand("CREATE TABLE IF NOT EXISTS events (eventID INTEGER PRIMARY KEY UNIQUE, name TEXT NOT NULL, type INTEGER NOT NULL, peerID INTEGER, peerChannel INTEGER, variable TEXT, trigger INTEGER, triggerValue BLOB, eventMethod TEXT, eventMethodParameters BLOB, resetAfter INTEGER, initialTime INTEGER, timeOperation INTEGER, timeFactor REAL, timeLimit INTEGER, resetMethod TEXT, resetMethodParameters BLOB, eventTime INTEGER, endTime INTEGER, recurEvery INTEGER, lastValue BLOB, lastRaised INTEGER, lastReset INTEGER, currentTime INTEGER, enabled INTEGER)");
@@ -351,61 +356,7 @@ void DatabaseController::initializeDatabase()
         }
         //}}}
 
-        //{{{ Create default roles
-        {
-            auto result = _db.executeCommand("SELECT count(*) FROM roles");
-            if(!result->empty() && result->begin()->second.begin()->second->intValue == 0)
-            {
-                std::string defaultRolesFile = GD::bl->settings.dataPath() + "defaultRoles.json";
-                if(GD::bl->io.fileExists(defaultRolesFile))
-                {
-                    auto rawRoles = GD::bl->io.getFileContent(defaultRolesFile);
-                    if(!BaseLib::HelperFunctions::trim(rawRoles).empty())
-                    {
-                        BaseLib::Rpc::JsonDecoder jsonDecoder(GD::bl.get());
-                        BaseLib::PVariable roles;
-                        try
-                        {
-                            roles = jsonDecoder.decode(rawRoles);
-                            for(auto& roleEntry : *roles->arrayValue)
-                            {
-                                auto idIterator = roleEntry->structValue->find("id");
-                                auto translationsIterator = roleEntry->structValue->find("translations");
-                                if(idIterator == roleEntry->structValue->end() || translationsIterator == roleEntry->structValue->end()) continue;
-
-                                int64_t id = idIterator->second->integerValue64;
-                                if(id <= 0) continue;
-
-                                auto metadata = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
-
-                                auto addVariablesIterator = roleEntry->structValue->find("addVariables");
-                                if(addVariablesIterator != roleEntry->structValue->end())
-                                {
-                                    metadata->structValue->emplace("addVariables", addVariablesIterator->second);
-                                }
-
-                                auto metadataIterator = roleEntry->structValue->find("metadata");
-                                if(metadataIterator != roleEntry->structValue->end())
-                                {
-                                    for(auto& metadataEntry : *metadataIterator->second->structValue)
-                                    {
-                                        if(metadataEntry.first == "addVariables") continue;
-                                        metadata->structValue->emplace(metadataEntry.first, metadataEntry.second);
-                                    }
-                                }
-
-                                createRoleInternal(id, translationsIterator->second, metadata);
-                            }
-                        }
-                        catch(BaseLib::Exception& ex)
-                        {
-                            GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-                        }
-                    }
-                }
-            }
-        }
-        //}}}
+        createDefaultRoles();
 
         BaseLib::Database::DataRow data;
         data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(0)));
@@ -416,7 +367,7 @@ void DatabaseController::initializeDatabase()
             data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn()));
             data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(0)));
             data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn()));
-            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn("0.7.10")));
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn("0.7.11")));
             data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn()));
             _db.executeCommand("INSERT INTO homegearVariables VALUES(?, ?, ?, ?, ?)", data);
 
@@ -455,10 +406,6 @@ void DatabaseController::initializeDatabase()
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -494,7 +441,7 @@ bool DatabaseController::convertDatabase()
         int64_t versionId = result->at(0).at(0)->intValue;
         std::string version = result->at(0).at(3)->textValue;
 
-        if(version == "0.7.10") return false; //Up to date
+        if(version == "0.7.11") return false; //Up to date
         /*if(version == "0.0.7")
 		{
 			GD::out.printMessage("Converting database from version " + version + " to version 0.3.0...");
@@ -883,8 +830,26 @@ bool DatabaseController::convertDatabase()
 
             version = "0.7.10";
         }
+        if(version == "0.7.10")
+        {
+            GD::out.printMessage("Converting database from version " + version + " to version 0.7.11...");
 
-        if(version != "0.7.10")
+            data.clear();
+            _db.executeCommand("ALTER TABLE systemVariables ADD COLUMN roles TEXT");
+
+            data.clear();
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(versionId)));
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(0)));
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn()));
+            //Don't forget to set new version in initializeDatabase!!!
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn("0.7.11")));
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn()));
+            _db.executeWriteCommand("REPLACE INTO homegearVariables VALUES(?, ?, ?, ?, ?)", data);
+
+            version = "0.7.11";
+        }
+
+        if(version != "0.7.11")
         {
             GD::out.printCritical("Critical: Unknown database version: " + version);
             return true; //Don't know, what to do
@@ -893,10 +858,6 @@ bool DatabaseController::convertDatabase()
         return false;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1036,10 +997,6 @@ BaseLib::PVariable DatabaseController::getData(std::string& component, std::stri
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1092,10 +1049,6 @@ BaseLib::PVariable DatabaseController::setData(std::string& component, std::stri
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1134,10 +1087,6 @@ BaseLib::PVariable DatabaseController::deleteData(std::string& component, std::s
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1168,10 +1117,6 @@ uint64_t DatabaseController::addUiElement(std::string& elementId, BaseLib::PVari
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1186,10 +1131,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getUiElements(
         return _db.executeCommand("SELECT id, element, data FROM uiElements");
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1210,10 +1151,6 @@ void DatabaseController::removeUiElement(uint64_t databaseId)
         _db.executeWriteCommand("DELETE FROM uiElements WHERE id=?", rowData);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1259,10 +1196,6 @@ BaseLib::PVariable DatabaseController::addRoomToStory(uint64_t storyId, uint64_t
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1295,10 +1228,6 @@ BaseLib::PVariable DatabaseController::createStory(BaseLib::PVariable translatio
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1319,10 +1248,6 @@ BaseLib::PVariable DatabaseController::deleteStory(uint64_t storyId)
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1369,10 +1294,6 @@ BaseLib::PVariable DatabaseController::getRoomsInStory(BaseLib::PRpcClientInfo c
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1393,10 +1314,6 @@ BaseLib::PVariable DatabaseController::getStoryMetadata(uint64_t storyId)
         return _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1484,10 +1401,6 @@ BaseLib::PVariable DatabaseController::getStories(std::string languageCode)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1528,10 +1441,6 @@ BaseLib::PVariable DatabaseController::removeRoomFromStories(uint64_t roomId)
         return std::make_shared<BaseLib::Variable>(true);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1576,10 +1485,6 @@ BaseLib::PVariable DatabaseController::removeRoomFromStory(uint64_t storyId, uin
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1596,10 +1501,6 @@ bool DatabaseController::storyExists(uint64_t storyId)
         return !_db.executeCommand("SELECT id FROM stories WHERE id=?", data)->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1627,10 +1528,6 @@ BaseLib::PVariable DatabaseController::setStoryMetadata(uint64_t storyId, BaseLi
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1668,10 +1565,6 @@ BaseLib::PVariable DatabaseController::updateStory(uint64_t storyId, BaseLib::PV
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1704,10 +1597,6 @@ BaseLib::PVariable DatabaseController::createRoom(BaseLib::PVariable translation
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1731,7 +1620,31 @@ BaseLib::PVariable DatabaseController::deleteRoom(uint64_t roomId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+    catch(...)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
+    }
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+
+std::string DatabaseController::getRoomName(BaseLib::PRpcClientInfo clientInfo, uint64_t roomId)
+{
+    try
+    {
+        BaseLib::Database::DataRow data;
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roomId));
+        auto rows = _db.executeCommand("SELECT translations FROM rooms WHERE id=?", data);
+
+        if(rows->empty()) return "";
+
+        auto translations = _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
+        auto language = clientInfo->language;
+        if(language.empty()) language = "en-US";
+
+        auto translationsIterator = translations->structValue->find(language);
+        if(translationsIterator != translations->structValue->end()) return translationsIterator->second->stringValue;
+    }
+    catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1739,7 +1652,7 @@ BaseLib::PVariable DatabaseController::deleteRoom(uint64_t roomId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
     }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+    return "";
 }
 
 BaseLib::PVariable DatabaseController::getRoomMetadata(uint64_t roomId)
@@ -1755,10 +1668,6 @@ BaseLib::PVariable DatabaseController::getRoomMetadata(uint64_t roomId)
         return _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1823,10 +1732,6 @@ BaseLib::PVariable DatabaseController::getRooms(BaseLib::PRpcClientInfo clientIn
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1843,10 +1748,6 @@ bool DatabaseController::roomExists(uint64_t roomId)
         return !_db.executeCommand("SELECT id FROM rooms WHERE id=?", data)->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1874,10 +1775,6 @@ BaseLib::PVariable DatabaseController::setRoomMetadata(uint64_t roomId, BaseLib:
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -1915,10 +1812,6 @@ BaseLib::PVariable DatabaseController::updateRoom(uint64_t roomId, BaseLib::PVar
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1951,10 +1844,6 @@ BaseLib::PVariable DatabaseController::createCategory(BaseLib::PVariable transla
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -1975,10 +1864,6 @@ BaseLib::PVariable DatabaseController::deleteCategory(uint64_t categoryId)
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2043,10 +1928,6 @@ BaseLib::PVariable DatabaseController::getCategories(BaseLib::PRpcClientInfo cli
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2070,10 +1951,6 @@ BaseLib::PVariable DatabaseController::getCategoryMetadata(uint64_t categoryId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2090,10 +1967,6 @@ bool DatabaseController::categoryExists(uint64_t categoryId)
         return !_db.executeCommand("SELECT id FROM categories WHERE id=?", data)->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2121,10 +1994,6 @@ BaseLib::PVariable DatabaseController::setCategoryMetadata(uint64_t categoryId, 
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2162,10 +2031,6 @@ BaseLib::PVariable DatabaseController::updateCategory(uint64_t categoryId, BaseL
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2175,6 +2040,84 @@ BaseLib::PVariable DatabaseController::updateCategory(uint64_t categoryId, BaseL
 //}}}
 
 //{{{ Roles
+void DatabaseController::createDefaultRoles()
+{
+    try
+    {
+        auto result = _db.executeCommand("SELECT count(*) FROM roles");
+        if((!result->empty() && result->begin()->second.begin()->second->intValue == 0) || GD::bl->settings.reloadRolesOnStartup())
+        {
+            std::string defaultRolesFile = GD::bl->settings.dataPath() + "defaultRoles.json";
+            if(GD::bl->io.fileExists(defaultRolesFile))
+            {
+                auto rawRoles = GD::bl->io.getFileContent(defaultRolesFile);
+                if(!BaseLib::HelperFunctions::trim(rawRoles).empty())
+                {
+                    BaseLib::Rpc::JsonDecoder jsonDecoder(GD::bl.get());
+                    BaseLib::PVariable roles;
+                    try
+                    {
+                        roles = jsonDecoder.decode(rawRoles);
+
+                        //Make sure, file exists and JSON is valid before deleting old roles
+                        _db.executeCommand("DELETE FROM roles");
+
+                        for(auto& roleEntry : *roles->arrayValue)
+                        {
+                            auto idIterator = roleEntry->structValue->find("id");
+                            auto translationsIterator = roleEntry->structValue->find("translations");
+                            if(idIterator == roleEntry->structValue->end() || translationsIterator == roleEntry->structValue->end()) continue;
+
+                            int64_t id = idIterator->second->integerValue64;
+                            if(id <= 0) continue;
+
+                            auto metadata = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
+
+                            auto addVariablesIterator = roleEntry->structValue->find("addVariables");
+                            if(addVariablesIterator != roleEntry->structValue->end())
+                            {
+                                metadata->structValue->emplace("addVariables", addVariablesIterator->second);
+                            }
+
+                            auto uiIterator = roleEntry->structValue->find("ui");
+                            if(uiIterator != roleEntry->structValue->end())
+                            {
+                                metadata->structValue->emplace("ui", uiIterator->second);
+                            }
+
+                            auto uiRefIterator = roleEntry->structValue->find("uiRef");
+                            if(uiRefIterator != roleEntry->structValue->end())
+                            {
+                                metadata->structValue->emplace("uiRef", uiRefIterator->second);
+                            }
+
+                            auto metadataIterator = roleEntry->structValue->find("metadata");
+                            if(metadataIterator != roleEntry->structValue->end())
+                            {
+                                for(auto& metadataEntry : *metadataIterator->second->structValue)
+                                {
+                                    if(metadataEntry.first == "addVariables" || metadataEntry.first == "ui") continue;
+                                    metadata->structValue->emplace(metadataEntry.first, metadataEntry.second);
+                                }
+                            }
+
+                            createRoleInternal(id, translationsIterator->second, metadata);
+                        }
+                    }
+                    catch(std::exception& ex)
+                    {
+                        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+                    }
+                }
+            }
+        }
+    }
+    catch(const std::exception& ex)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+    }
+}
+
 void DatabaseController::createRoleInternal(uint64_t roleId, const BaseLib::PVariable& translations, const BaseLib::PVariable& metadata)
 {
     try
@@ -2195,14 +2138,6 @@ void DatabaseController::createRoleInternal(uint64_t roleId, const BaseLib::PVar
     catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
     }
 }
 
@@ -2229,10 +2164,6 @@ BaseLib::PVariable DatabaseController::createRole(BaseLib::PVariable translation
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2256,15 +2187,23 @@ BaseLib::PVariable DatabaseController::deleteRole(uint64_t roleId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+
+void DatabaseController::deleteAllRoles()
+{
+    try
+    {
+        _db.executeCommand("DROP INDEX rolesIndex");
+        _db.executeCommand("DROP TABLE roles");
+
+        _db.executeCommand("CREATE TABLE IF NOT EXISTS roles (id INTEGER PRIMARY KEY UNIQUE, translations BLOB, metadata BLOB)");
+        _db.executeCommand("CREATE INDEX IF NOT EXISTS rolesIndex ON roles (id)");
+    }
+    catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
 
 BaseLib::PVariable DatabaseController::getRoles(BaseLib::PRpcClientInfo clientInfo, std::string languageCode, bool checkAcls)
@@ -2321,10 +2260,6 @@ BaseLib::PVariable DatabaseController::getRoles(BaseLib::PRpcClientInfo clientIn
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2348,10 +2283,6 @@ BaseLib::PVariable DatabaseController::getRoleMetadata(uint64_t roleId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2368,10 +2299,6 @@ bool DatabaseController::roleExists(uint64_t roleId)
         return !_db.executeCommand("SELECT id FROM roles WHERE id=?", data)->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2399,10 +2326,6 @@ BaseLib::PVariable DatabaseController::setRoleMetadata(uint64_t roleId, BaseLib:
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2440,10 +2363,6 @@ BaseLib::PVariable DatabaseController::updateRole(uint64_t roleId, BaseLib::PVar
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2468,10 +2387,6 @@ std::set<std::string> DatabaseController::getAllNodeDataNodes()
         return nodeIds;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2556,10 +2471,6 @@ BaseLib::PVariable DatabaseController::getNodeData(std::string& node, std::strin
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2612,10 +2523,6 @@ BaseLib::PVariable DatabaseController::setNodeData(std::string& node, std::strin
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2654,10 +2561,6 @@ BaseLib::PVariable DatabaseController::deleteNodeData(std::string& node, std::st
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2691,10 +2594,6 @@ BaseLib::PVariable DatabaseController::getAllMetadata(BaseLib::PRpcClientInfo cl
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2709,19 +2608,20 @@ BaseLib::PVariable DatabaseController::getMetadata(uint64_t peerID, std::string&
         if(dataID.size() > 250) return BaseLib::Variable::createError(-32602, "dataID has more than 250 characters.");
 
         BaseLib::PVariable metadata;
-        _metadataMutex.lock();
-        std::map<uint64_t, std::map<std::string, BaseLib::PVariable>>::iterator peerIterator = _metadata.find(peerID);
-        if(peerIterator != _metadata.end())
+
         {
-            std::map<std::string, BaseLib::PVariable>::iterator dataIterator = peerIterator->second.find(dataID);
-            if(dataIterator != peerIterator->second.end())
+            std::lock_guard<std::mutex> metadataGuard(_metadataMutex);
+            auto peerIterator = _metadata.find(peerID);
+            if(peerIterator != _metadata.end())
             {
-                metadata = dataIterator->second;
-                _metadataMutex.unlock();
-                return metadata;
+                std::map<std::string, BaseLib::PVariable>::iterator dataIterator = peerIterator->second.find(dataID);
+                if(dataIterator != peerIterator->second.end())
+                {
+                    metadata = dataIterator->second;
+                    return metadata;
+                }
             }
         }
-        _metadataMutex.unlock();
 
         BaseLib::Database::DataRow data;
         data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(std::to_string(peerID))));
@@ -2731,16 +2631,11 @@ BaseLib::PVariable DatabaseController::getMetadata(uint64_t peerID, std::string&
         if(rows->empty() || rows->at(0).empty()) return std::make_shared<BaseLib::Variable>();
 
         metadata = _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
-        _metadataMutex.lock();
+        std::lock_guard<std::mutex> metadataGuard(_metadataMutex);
         _metadata[peerID][dataID] = metadata;
-        _metadataMutex.unlock();
         return metadata;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -2771,9 +2666,10 @@ BaseLib::PVariable DatabaseController::setMetadata(BaseLib::PRpcClientInfo clien
             return BaseLib::Variable::createError(-32500, "Reached limit of 1000000 metadata entries. Please delete metadata before adding new entries.");
         }
 
-        _metadataMutex.lock();
-        _metadata[peerID][dataID] = metadata;
-        _metadataMutex.unlock();
+        {
+            std::lock_guard<std::mutex> metadataGuard(_metadataMutex);
+            _metadata[peerID][dataID] = metadata;
+        }
 
         BaseLib::Database::DataRow data;
         data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(std::to_string(peerID))));
@@ -2807,10 +2703,6 @@ BaseLib::PVariable DatabaseController::setMetadata(BaseLib::PRpcClientInfo clien
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2824,16 +2716,17 @@ BaseLib::PVariable DatabaseController::deleteMetadata(uint64_t peerID, std::stri
     {
         if(dataID.size() > 250) return BaseLib::Variable::createError(-32602, "dataID has more than 250 characters.");
 
-        _metadataMutex.lock();
-        if(dataID.empty())
         {
-            if(_metadata.find(peerID) != _metadata.end()) _metadata.erase(peerID);
+            std::lock_guard<std::mutex> metadataGuard(_metadataMutex);
+            if(dataID.empty())
+            {
+                if(_metadata.find(peerID) != _metadata.end()) _metadata.erase(peerID);
+            }
+            else
+            {
+                if(_metadata.find(peerID) != _metadata.end() && _metadata[peerID].find(dataID) != _metadata[peerID].end()) _metadata[peerID].erase(dataID);
+            }
         }
-        else
-        {
-            if(_metadata.find(peerID) != _metadata.end() && _metadata[peerID].find(dataID) != _metadata[peerID].end()) _metadata[peerID].erase(dataID);
-        }
-        _metadataMutex.unlock();
 
         BaseLib::Database::DataRow data;
         data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(std::to_string(peerID))));
@@ -2869,10 +2762,6 @@ BaseLib::PVariable DatabaseController::deleteMetadata(uint64_t peerID, std::stri
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -2882,147 +2771,52 @@ BaseLib::PVariable DatabaseController::deleteMetadata(uint64_t peerID, std::stri
 //End metadata
 
 //System variables
-BaseLib::PVariable DatabaseController::deleteSystemVariable(std::string& variableId)
+void DatabaseController::deleteSystemVariable(std::string& variableId)
 {
     try
     {
-        if(variableId.size() > 250) return BaseLib::Variable::createError(-32602, "variableId has more than 250 characters.");
-
-        {
-            std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-            if(_systemVariables.find(variableId) != _systemVariables.end()) _systemVariables.erase(variableId);
-        }
+        if(variableId.size() > 250) return;
 
         BaseLib::Database::DataRow data;
         data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(variableId)));
         std::string command("DELETE FROM systemVariables WHERE variableID=?");
         std::shared_ptr<BaseLib::IQueueEntry> entry = std::make_shared<QueueEntry>(command, data);
         enqueue(0, entry);
-
-        std::shared_ptr<std::vector<std::string>> valueKeys(new std::vector<std::string>{variableId});
-        std::shared_ptr<std::vector<BaseLib::PVariable>> values(new std::vector<BaseLib::PVariable>());
-        BaseLib::PVariable value(new BaseLib::Variable(BaseLib::VariableType::tStruct));
-        value->structValue->insert(BaseLib::StructElement("TYPE", BaseLib::PVariable(new BaseLib::Variable(0))));
-        value->structValue->insert(BaseLib::StructElement("CODE", BaseLib::PVariable(new BaseLib::Variable(1))));
-        values->push_back(value);
-#ifdef EVENTHANDLER
-        GD::eventHandler->trigger(variableId, value);
-#endif
-        std::string source;
-        if(GD::nodeBlueServer) GD::nodeBlueServer->broadcastEvent(source, 0, -1, valueKeys, values);
-#ifndef NO_SCRIPTENGINE
-        GD::scriptEngineServer->broadcastEvent(source, 0, -1, valueKeys, values);
-#endif
-        if(GD::ipcServer) GD::ipcServer->broadcastEvent(source, 0, -1, valueKeys, values);
-        std::string deviceAddress;
-        GD::rpcClient->broadcastEvent(source, 0, -1, deviceAddress, valueKeys, values);
-
-        return BaseLib::PVariable(new BaseLib::Variable(BaseLib::VariableType::tVoid));
     }
     catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
 
-BaseLib::PVariable DatabaseController::getAllSystemVariables(BaseLib::PRpcClientInfo clientInfo, bool returnRoomsCategoriesFlags, bool checkAcls)
+std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getAllSystemVariables()
 {
     try
     {
-        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT variableID, serializedObject, room, categories, flags FROM systemVariables");
-
-        BaseLib::PVariable systemVariableStruct = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
-        if(rows->empty()) return systemVariableStruct;
-        for(auto i = rows->begin(); i != rows->end(); ++i)
-        {
-            if(i->second.size() < 4) continue;
-
-            BaseLib::Database::PSystemVariable systemVariable;
-
-            {
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                auto systemVariableIterator = _systemVariables.find(i->second.at(0)->textValue);
-                if(systemVariableIterator != _systemVariables.end()) systemVariable = systemVariableIterator->second;
-            }
-
-            if(!systemVariable)
-            {
-                systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-                systemVariable->name = i->second.at(0)->textValue;
-                systemVariable->value = _rpcDecoder->decodeResponse(*i->second.at(1)->binaryValue);
-                systemVariable->room = (uint64_t)rows->at(0).at(2)->intValue;
-
-                std::vector<std::string> categoryStrings = BaseLib::HelperFunctions::splitAll(rows->at(0).at(3)->textValue, ',');
-                for(auto& categoryString : categoryStrings)
-                {
-                    uint64_t category = BaseLib::Math::getUnsignedNumber64(categoryString);
-                    if(category != 0) systemVariable->categories.emplace(category);
-                }
-
-                systemVariable->flags = (int32_t)rows->at(0).at(4)->intValue;
-
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                _systemVariables.emplace(systemVariable->name, systemVariable);
-            }
-
-            if(checkAcls && !clientInfo->acls->checkSystemVariableReadAccess(systemVariable)) continue;
-
-            if(systemVariable->flags != -1 && (systemVariable->flags & 2))
-            {
-                auto& source = clientInfo->initInterfaceId;
-                if(source != "homegear" && source != "scriptEngine" && source != "ipcServer" && source != "nodeBlue")
-                {
-                    continue;
-                }
-            }
-
-            if(returnRoomsCategoriesFlags)
-            {
-                BaseLib::PVariable element = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
-
-                if(systemVariable->room != 0) element->structValue->emplace("ROOM", std::make_shared<BaseLib::Variable>(systemVariable->room));
-
-                BaseLib::PVariable categoriesArray = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tArray);
-                categoriesArray->arrayValue->reserve(systemVariable->categories.size());
-                for(auto category : systemVariable->categories)
-                {
-                    if(category != 0) categoriesArray->arrayValue->push_back(std::make_shared<BaseLib::Variable>(category));
-                }
-                if(!categoriesArray->arrayValue->empty()) element->structValue->emplace("CATEGORIES", categoriesArray);
-
-                if(systemVariable->flags > 0) element->structValue->emplace("FLAGS", std::make_shared<BaseLib::Variable>(systemVariable->flags));
-
-                element->structValue->emplace("VALUE", systemVariable->value);
-
-                systemVariableStruct->structValue->insert(BaseLib::StructElement(systemVariable->name, element));
-            }
-            else systemVariableStruct->structValue->insert(BaseLib::StructElement(systemVariable->name, systemVariable->value));
-        }
-
-        return systemVariableStruct;
+        return _db.executeCommand("SELECT variableID, serializedObject, room, categories, roles, flags FROM systemVariables");
     }
     catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+    return std::shared_ptr<BaseLib::Database::DataTable>();
+}
+
+std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getSystemVariable(const std::string& variableId)
+{
+    try
+    {
+        if(variableId.size() > 250) return std::shared_ptr<BaseLib::Database::DataTable>();
+
+        BaseLib::Database::DataRow data;
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
+        return _db.executeCommand("SELECT serializedObject, room, categories, roles, flags FROM systemVariables WHERE variableID=?", data);
+    }
+    catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+    return std::shared_ptr<BaseLib::Database::DataTable>();
 }
 
 void DatabaseController::removeCategoryFromSystemVariables(uint64_t categoryId)
@@ -3059,13 +2853,41 @@ void DatabaseController::removeCategoryFromSystemVariables(uint64_t categoryId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+}
+
+void DatabaseController::removeRoleFromSystemVariables(uint64_t roleId)
+{
+    try
+    {
+        if(roleId == 0) return;
+        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT variableID, roles FROM systemVariables");
+
+        for(auto i = rows->begin(); i != rows->end(); ++i)
+        {
+            std::vector<std::string> roleStrings = BaseLib::HelperFunctions::splitAll(i->second.at(1)->textValue, ',');
+            bool containsRole = false;
+
+            std::ostringstream roleStream;
+            for(auto& roleString : roleStrings)
+            {
+                uint64_t role = BaseLib::Math::getUnsignedNumber64(roleString);
+                if(role == roleId) containsRole = true;
+                else roleStream << std::to_string(role) << ",";
+            }
+
+            if(containsRole)
+            {
+                std::string roleString = roleStream.str();
+                BaseLib::Database::DataRow data;
+                data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roleString));
+                data.push_back(std::make_shared<BaseLib::Database::DataColumn>(i->second.at(0)->intValue));
+                _db.executeCommand("UPDATE systemVariables SET roles=? WHERE variableID=?", data);
+            }
+        }
+    }
+    catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
     }
 }
 
@@ -3082,411 +2904,27 @@ void DatabaseController::removeRoomFromSystemVariables(uint64_t roomId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
 }
 
-BaseLib::PVariable DatabaseController::getSystemVariable(BaseLib::PRpcClientInfo clientInfo, std::string& variableId, bool checkAcls)
-{
-    try
-    {
-        if(variableId.size() > 250) return BaseLib::Variable::createError(-32602, "variableId has more than 250 characters.");
-
-        auto systemVariable = getSystemVariableInternal(variableId);
-        if(!systemVariable) return std::make_shared<BaseLib::Variable>();
-
-        if(checkAcls && !clientInfo->acls->checkSystemVariableReadAccess(systemVariable)) return BaseLib::Variable::createError(-32603, "Unauthorized.");
-
-        if(systemVariable->flags != -1 && (systemVariable->flags & 2))
-        {
-            auto& source = clientInfo->initInterfaceId;
-            if(source != "homegear" && source != "scriptEngine" && source != "ipcServer" && source != "nodeBlue")
-            {
-                return BaseLib::Variable::createError(-32603, "Unauthorized.");
-            }
-        }
-
-        return systemVariable->value;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
-}
-
-BaseLib::Database::PSystemVariable DatabaseController::getSystemVariableInternal(std::string& variableId)
-{
-    try
-    {
-        {
-            std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-            auto systemVariableIterator = _systemVariables.find(variableId);
-            if(systemVariableIterator != _systemVariables.end())
-            {
-                return systemVariableIterator->second;
-            }
-        }
-
-        BaseLib::Database::DataRow data;
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
-
-        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT serializedObject, room, categories, flags FROM systemVariables WHERE variableID=?", data);
-        if(rows->empty() || rows->at(0).empty()) return BaseLib::Database::PSystemVariable();
-
-        auto value = _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
-
-        auto systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-        systemVariable->name = variableId;
-        systemVariable->value = value;
-        systemVariable->room = (uint64_t)rows->at(0).at(1)->intValue;
-
-        std::vector<std::string> categoryStrings = BaseLib::HelperFunctions::splitAll(rows->at(0).at(2)->textValue, ',');
-        for(auto& categoryString : categoryStrings)
-        {
-            uint64_t category = BaseLib::Math::getUnsignedNumber64(categoryString);
-            if(category != 0) systemVariable->categories.emplace(category);
-        }
-
-        systemVariable->flags = (int32_t)rows->at(0).at(3)->intValue;
-
-        std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-        _systemVariables.emplace(variableId, systemVariable);
-        return systemVariable;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Database::PSystemVariable();
-}
-
-BaseLib::PVariable DatabaseController::getSystemVariableCategories(std::string& variableId)
-{
-    try
-    {
-        auto categories = getSystemVariableCategoriesInternal(variableId);
-        BaseLib::PVariable result = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tArray);
-        result->arrayValue->reserve(categories.size());
-        for(auto category : categories)
-        {
-            result->arrayValue->push_back(std::make_shared<BaseLib::Variable>(category));
-        }
-        return result;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
-}
-
-std::set<uint64_t> DatabaseController::getSystemVariableCategoriesInternal(std::string& variableId)
-{
-    try
-    {
-        if(variableId.size() > 250) return std::set<uint64_t>();
-
-        {
-            std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-            auto systemVariableIterator = _systemVariables.find(variableId);
-            if(systemVariableIterator != _systemVariables.end())
-            {
-                return systemVariableIterator->second->categories;
-            }
-        }
-
-        BaseLib::Database::DataRow data;
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
-
-        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT serializedObject, room, categories, flags FROM systemVariables WHERE variableID=?", data);
-        if(rows->empty() || rows->at(0).empty()) return std::set<uint64_t>();
-
-        auto value = _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
-
-        auto systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-        systemVariable->name = variableId;
-        systemVariable->value = value;
-        systemVariable->room = (uint64_t)rows->at(0).at(1)->intValue;
-
-        std::vector<std::string> categoryStrings = BaseLib::HelperFunctions::splitAll(rows->at(0).at(2)->textValue, ',');
-        for(auto& categoryString : categoryStrings)
-        {
-            uint64_t category = BaseLib::Math::getUnsignedNumber64(categoryString);
-            if(category != 0) systemVariable->categories.emplace(category);
-        }
-
-        systemVariable->flags = (int32_t)rows->at(0).at(3)->intValue;
-
-        std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-        _systemVariables.emplace(variableId, systemVariable);
-        return systemVariable->categories;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return std::set<uint64_t>();
-}
-
-BaseLib::PVariable DatabaseController::getSystemVariableRoom(std::string& variableId)
-{
-    return std::make_shared<BaseLib::Variable>(getSystemVariableRoomInternal(variableId));
-}
-
-BaseLib::PVariable DatabaseController::getSystemVariablesInCategory(BaseLib::PRpcClientInfo clientInfo, uint64_t categoryId, bool checkAcls)
-{
-    try
-    {
-        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT variableID, serializedObject, room, categories, flags FROM systemVariables");
-
-        BaseLib::PVariable systemVariableArray = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tArray);
-        systemVariableArray->arrayValue->reserve(rows->size());
-        if(rows->empty()) return systemVariableArray;
-        for(auto i = rows->begin(); i != rows->end(); ++i)
-        {
-            if(i->second.size() < 4) continue;
-
-            BaseLib::Database::PSystemVariable systemVariable;
-
-            {
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                auto systemVariableIterator = _systemVariables.find(i->second.at(0)->textValue);
-                if(systemVariableIterator != _systemVariables.end()) systemVariable = systemVariableIterator->second;
-            }
-
-            if(!systemVariable)
-            {
-                systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-                systemVariable->name = i->second.at(0)->textValue;
-                systemVariable->value = _rpcDecoder->decodeResponse(*i->second.at(1)->binaryValue);
-                systemVariable->room = (uint64_t) i->second.at(2)->intValue;
-
-                std::vector<std::string> categoryStrings = BaseLib::HelperFunctions::splitAll(i->second.at(3)->textValue, ',');
-                for(auto& categoryString : categoryStrings)
-                {
-                    uint64_t category = BaseLib::Math::getUnsignedNumber64(categoryString);
-                    if(category != 0) systemVariable->categories.emplace(category);
-                }
-
-                systemVariable->flags = (int32_t)i->second.at(3)->intValue;
-
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                _systemVariables.emplace(systemVariable->name, systemVariable);
-            }
-
-            if(checkAcls && !clientInfo->acls->checkSystemVariableReadAccess(systemVariable)) continue;
-
-            if(systemVariable->flags != -1 && (systemVariable->flags & 2))
-            {
-                auto& source = clientInfo->initInterfaceId;
-                if(source != "homegear" && source != "scriptEngine" && source != "ipcServer" && source != "nodeBlue")
-                {
-                    continue;
-                }
-            }
-
-            if((systemVariable->categories.empty() && categoryId == 0) || systemVariable->categories.find(categoryId) != systemVariable->categories.end())
-            {
-                systemVariableArray->arrayValue->push_back(std::make_shared<BaseLib::Variable>(systemVariable->name));
-            }
-        }
-
-        return systemVariableArray;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
-}
-
-BaseLib::PVariable DatabaseController::getSystemVariablesInRoom(BaseLib::PRpcClientInfo clientInfo, uint64_t roomId, bool checkAcls)
+std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getSystemVariablesInRoom(uint64_t roomId)
 {
     try
     {
         BaseLib::Database::DataRow data;
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roomId));
-        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT variableID, serializedObject, categories, flags FROM systemVariables WHERE room=?", data);
-
-        BaseLib::PVariable systemVariableArray = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tArray);
-        systemVariableArray->arrayValue->reserve(rows->size());
-        if(rows->empty()) return systemVariableArray;
-        for(auto i = rows->begin(); i != rows->end(); ++i)
-        {
-            if(i->second.size() < 3) continue;
-
-            BaseLib::Database::PSystemVariable systemVariable;
-
-            {
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                auto systemVariableIterator = _systemVariables.find(i->second.at(0)->textValue);
-                if(systemVariableIterator != _systemVariables.end()) systemVariable = systemVariableIterator->second;
-            }
-
-            if(!systemVariable)
-            {
-                systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-                systemVariable->name = i->second.at(0)->textValue;
-                systemVariable->value = _rpcDecoder->decodeResponse(*i->second.at(1)->binaryValue);
-                systemVariable->room = roomId;
-
-                std::vector<std::string> categoryStrings = BaseLib::HelperFunctions::splitAll(i->second.at(2)->textValue, ',');
-                for(auto& categoryString : categoryStrings)
-                {
-                    uint64_t category = BaseLib::Math::getUnsignedNumber64(categoryString);
-                    if(category != 0) systemVariable->categories.emplace(category);
-                }
-
-                systemVariable->flags = (int32_t)i->second.at(3)->intValue;
-
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                _systemVariables.emplace(systemVariable->name, systemVariable);
-            }
-
-            if(checkAcls && !clientInfo->acls->checkSystemVariableReadAccess(systemVariable)) continue;
-
-            if(systemVariable->flags != -1 && (systemVariable->flags & 2))
-            {
-                auto& source = clientInfo->initInterfaceId;
-                if(source != "homegear" && source != "scriptEngine" && source != "ipcServer" && source != "nodeBlue")
-                {
-                    continue;
-                }
-            }
-
-            systemVariableArray->arrayValue->push_back(std::make_shared<BaseLib::Variable>(systemVariable->name));
-        }
-
-        return systemVariableArray;
+        return _db.executeCommand("SELECT variableID, serializedObject, categories, roles, flags FROM systemVariables WHERE room=?", data);
     }
     catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+    return std::shared_ptr<BaseLib::Database::DataTable>();
 }
 
-uint64_t DatabaseController::getSystemVariableRoomInternal(std::string& variableId)
+BaseLib::PVariable DatabaseController::setSystemVariable(std::string& variableId, BaseLib::PVariable& value, uint64_t roomId, const std::string& categories, const std::string& roles, int32_t flags)
 {
     try
     {
-        if(variableId.size() > 250) return 0;
-
-        {
-            std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-            auto systemVariableIterator = _systemVariables.find(variableId);
-            if(systemVariableIterator != _systemVariables.end())
-            {
-                return systemVariableIterator->second->room;
-            }
-        }
-
-        BaseLib::Database::DataRow data;
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
-
-        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT serializedObject, room, categories, flags FROM systemVariables WHERE variableID=?", data);
-        if(rows->empty() || rows->at(0).empty()) return 0;
-
-        auto value = _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
-
-        auto systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-        systemVariable->name = variableId;
-        systemVariable->value = value;
-        systemVariable->room = (uint64_t)rows->at(0).at(1)->intValue;
-
-        std::vector<std::string> categoryStrings = BaseLib::HelperFunctions::splitAll(rows->at(0).at(2)->textValue, ',');
-        for(auto& categoryString : categoryStrings)
-        {
-            uint64_t category = BaseLib::Math::getUnsignedNumber64(categoryString);
-            if(category != 0) systemVariable->categories.emplace(category);
-        }
-
-        systemVariable->flags = (int32_t)rows->at(0).at(3)->intValue;
-
-        std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-        _systemVariables.emplace(variableId, systemVariable);
-        return systemVariable->room;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return 0;
-}
-
-BaseLib::PVariable DatabaseController::setSystemVariable(BaseLib::PRpcClientInfo clientInfo, std::string& variableId, BaseLib::PVariable& value, int32_t flags, bool checkAcls)
-{
-    try
-    {
-        if(!value) return BaseLib::Variable::createError(-32602, "Could not parse data.");
-        if(variableId.empty()) return BaseLib::Variable::createError(-32602, "variableId is an empty string.");
-        if(variableId.size() > 250) return BaseLib::Variable::createError(-32602, "variableId has more than 250 characters.");
-        //Don't check for type here, so base64, string and future data types that use stringValue are handled
-        if(value->type != BaseLib::VariableType::tBase64 && value->type != BaseLib::VariableType::tString && value->type != BaseLib::VariableType::tInteger && value->type != BaseLib::VariableType::tInteger64 && value->type != BaseLib::VariableType::tFloat && value->type != BaseLib::VariableType::tBoolean && value->type != BaseLib::VariableType::tStruct && value->type != BaseLib::VariableType::tArray) return BaseLib::Variable::createError(-32602, "Type " + BaseLib::Variable::getTypeString(value->type) + " is currently not supported.");
-
         std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT COUNT(*) FROM systemVariables");
         if(rows->empty() || rows->at(0).empty())
         {
@@ -3497,86 +2935,18 @@ BaseLib::PVariable DatabaseController::setSystemVariable(BaseLib::PRpcClientInfo
             return BaseLib::Variable::createError(-32500, "Reached limit of 1000000 system variable entries. Please delete system variables before adding new ones.");
         }
 
-        BaseLib::Database::PSystemVariable systemVariable = getSystemVariableInternal(variableId);
-
-        {
-            if(!systemVariable)
-            {
-                systemVariable = std::make_shared<BaseLib::Database::SystemVariable>();
-                systemVariable->name = variableId;
-                systemVariable->value = value;
-                systemVariable->flags = flags;
-
-                if(checkAcls && !clientInfo->acls->checkSystemVariableWriteAccess(systemVariable)) return BaseLib::Variable::createError(-32603, "Unauthorized.");
-
-                std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-                _systemVariables.emplace(variableId, systemVariable);
-            }
-            else
-            {
-                if(checkAcls && !clientInfo->acls->checkSystemVariableWriteAccess(systemVariable)) return BaseLib::Variable::createError(-32603, "Unauthorized.");
-
-                { //Check flags
-                    if(systemVariable->flags != -1 && (systemVariable->flags & 3)) //Readonly or invisible
-                    {
-                        auto& source = clientInfo->initInterfaceId;
-                        if(source != "homegear" && source != "scriptEngine" && source != "ipcServer" && source != "nodeBlue")
-                        {
-                            return BaseLib::Variable::createError(-32603, "Unauthorized.");
-                        }
-                    }
-                }
-
-                //Set type to old value type, value already is converted by constructor of class Variable or RpcDecoder
-                if(systemVariable->value->type != BaseLib::VariableType::tVoid)
-                {
-                    if(value->type != systemVariable->value->type)
-                    {
-                        value->type = systemVariable->value->type;
-                    }
-
-                    if(value->type == BaseLib::VariableType::tInteger64 && value->integerValue64 == (int64_t)value->integerValue)
-                    {
-                        value->type = BaseLib::VariableType::tInteger;
-                    }
-                }
-
-                systemVariable->value = value;
-                if(flags != -1) systemVariable->flags = flags;
-            }
-        }
-
         BaseLib::Database::DataRow data;
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
         std::vector<char> encodedValue;
         _rpcEncoder->encodeResponse(value, encodedValue);
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(encodedValue));
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(systemVariable->room));
-        std::ostringstream categories;
-        for(auto category : systemVariable->categories)
-        {
-            categories << std::to_string(category) << ",";
-        }
-        std::string categoryString = categories.str();
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(categoryString));
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roomId));
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(categories));
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roles));
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(flags));
 
-        std::shared_ptr<BaseLib::IQueueEntry> entry = std::make_shared<QueueEntry>("INSERT OR REPLACE INTO systemVariables(variableID, serializedObject, room, categories, flags) VALUES(?, ?, ?, ?, ?)", data);
+        std::shared_ptr<BaseLib::IQueueEntry> entry = std::make_shared<QueueEntry>("INSERT OR REPLACE INTO systemVariables(variableID, serializedObject, room, categories, roles, flags) VALUES(?, ?, ?, ?, ?, ?)", data);
         enqueue(0, entry);
-
-#ifdef EVENTHANDLER
-        GD::eventHandler->trigger(variableId, value);
-#endif
-        std::string& source = clientInfo->initInterfaceId;
-        std::shared_ptr<std::vector<std::string>> valueKeys(new std::vector<std::string>{variableId});
-        std::shared_ptr<std::vector<BaseLib::PVariable>> values(new std::vector<BaseLib::PVariable>{value});
-        if(GD::nodeBlueServer) GD::nodeBlueServer->broadcastEvent(source, 0, -1, valueKeys, values);
-#ifndef NO_SCRIPTENGINE
-        GD::scriptEngineServer->broadcastEvent(source, 0, -1, valueKeys, values);
-#endif
-        if(GD::ipcServer) GD::ipcServer->broadcastEvent(source, 0, -1, valueKeys, values);
-        std::string deviceAddress;
-        GD::rpcClient->broadcastEvent(source, 0, -1, deviceAddress, valueKeys, values);
 
         return std::make_shared<BaseLib::Variable>();
     }
@@ -3584,46 +2954,18 @@ BaseLib::PVariable DatabaseController::setSystemVariable(BaseLib::PRpcClientInfo
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
     return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
 
-BaseLib::PVariable DatabaseController::setSystemVariableCategories(std::string& variableId, std::set<uint64_t>& categoryIds)
+BaseLib::PVariable DatabaseController::setSystemVariableCategories(std::string& variableId, const std::string& categories)
 {
     try
     {
         if(variableId.empty()) return BaseLib::Variable::createError(-32602, "variableId is an empty string.");
         if(variableId.size() > 250) return BaseLib::Variable::createError(-32602, "variableId has more than 250 characters.");
 
-        {
-            std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-            auto systemVariableIterator = _systemVariables.find(variableId);
-            if(systemVariableIterator == _systemVariables.end())
-            {
-                auto value = getSystemVariableInternal(variableId);
-                systemVariableIterator = _systemVariables.find(variableId);
-                if(systemVariableIterator == _systemVariables.end()) return BaseLib::Variable::createError(-5, "Unknown variable.");
-            }
-
-            systemVariableIterator->second->categories = categoryIds;
-        }
-
-        std::ostringstream categories;
-        for(auto category : categoryIds)
-        {
-            categories << std::to_string(category) << ",";
-        }
-        std::string categoryString = categories.str();
-
         BaseLib::Database::DataRow data;
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(categoryString));
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(categories));
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
         _db.executeCommand("UPDATE systemVariables SET categories=? WHERE variableID=?", data);
 
@@ -3633,13 +2975,26 @@ BaseLib::PVariable DatabaseController::setSystemVariableCategories(std::string& 
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+
+BaseLib::PVariable DatabaseController::setSystemVariableRoles(std::string& variableId, const std::string& roles)
+{
+    try
+    {
+        if(variableId.empty()) return BaseLib::Variable::createError(-32602, "variableId is an empty string.");
+        if(variableId.size() > 250) return BaseLib::Variable::createError(-32602, "variableId has more than 250 characters.");
+
+        BaseLib::Database::DataRow data;
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roles));
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(variableId));
+        _db.executeCommand("UPDATE systemVariables SET roles=? WHERE variableID=?", data);
+
+        return std::make_shared<BaseLib::Variable>();
+    }
+    catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
     }
     return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
@@ -3650,20 +3005,6 @@ BaseLib::PVariable DatabaseController::setSystemVariableRoom(std::string& variab
     {
         if(variableId.empty()) return BaseLib::Variable::createError(-32602, "variableId is an empty string.");
         if(variableId.size() > 250) return BaseLib::Variable::createError(-32602, "variableId has more than 250 characters.");
-
-        {
-            std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-            auto systemVariableIterator = _systemVariables.find(variableId);
-            if(systemVariableIterator == _systemVariables.end())
-            {
-                auto value = getSystemVariableInternal(variableId);
-                systemVariableIterator = _systemVariables.find(variableId);
-                if(systemVariableIterator == _systemVariables.end()) return BaseLib::Variable::createError(-5, "Unknown variable.");
-            }
-
-            if(systemVariableIterator->second->room != roomId) systemVariableIterator->second->room = roomId;
-            else return std::make_shared<BaseLib::Variable>();
-        }
 
         BaseLib::Database::DataRow data;
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(roomId));
@@ -3676,37 +3017,11 @@ BaseLib::PVariable DatabaseController::setSystemVariableRoom(std::string& variab
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
     return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
-
-bool DatabaseController::systemVariableHasCategory(std::string& variableId, uint64_t categoryId)
-{
-    //No try/catch to throw exceptions in calling method => avoid valid return on errors. Important for ACLs.
-    {
-        std::lock_guard<std::mutex> systemVariableGuard(_systemVariableMutex);
-        auto systemVariableIterator = _systemVariables.find(variableId);
-        if(systemVariableIterator != _systemVariables.end())
-        {
-            return systemVariableIterator->second->categories.find(categoryId) != systemVariableIterator->second->categories.end();
-        }
-    }
-
-    //Not in cache
-    auto categories = getSystemVariableCategoriesInternal(variableId);
-    return categories.find(categoryId) != categories.end();
-}
-
 //End system variables
 
-//Users
+//{{{ Users
 std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getUsers()
 {
     try
@@ -3715,10 +3030,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getUsers()
         return rows;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -3770,10 +3081,6 @@ bool DatabaseController::createUser(const std::string& name, const std::vector<u
         if(userNameExists(name)) return true;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -3838,10 +3145,6 @@ bool DatabaseController::updateUser(uint64_t id, const std::vector<uint8_t>& pas
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -3855,16 +3158,13 @@ bool DatabaseController::deleteUser(uint64_t id)
     {
         BaseLib::Database::DataRow data;
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(id));
+        _db.executeCommand("DELETE FROM userData WHERE userID=?", data);
         _db.executeCommand("DELETE FROM users WHERE userID=?", data);
 
         std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT userID FROM users WHERE userID=?", data);
         return rows->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -3884,10 +3184,6 @@ bool DatabaseController::userNameExists(const std::string& name)
         return !_db.executeCommand("SELECT userID FROM users WHERE name=?", data)->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -3912,10 +3208,6 @@ uint64_t DatabaseController::getUserId(const std::string& name)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -3937,10 +3229,6 @@ int64_t DatabaseController::getUserKeyIndex1(uint64_t userId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -3959,10 +3247,6 @@ int64_t DatabaseController::getUserKeyIndex2(uint64_t userId)
         return result->at(0).at(0)->intValue;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -3994,10 +3278,6 @@ std::vector<uint64_t> DatabaseController::getUsersGroups(uint64_t userId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4021,10 +3301,6 @@ BaseLib::PVariable DatabaseController::getUserMetadata(uint64_t userId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4042,10 +3318,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getPassword(co
         return rows;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4071,10 +3343,6 @@ void DatabaseController::setUserKeyIndex1(uint64_t userId, int64_t keyIndex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4093,10 +3361,6 @@ void DatabaseController::setUserKeyIndex2(uint64_t userId, int64_t keyIndex)
         _db.executeCommand("UPDATE users SET keyIndex2=? WHERE userID=?", data);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4126,7 +3390,46 @@ BaseLib::PVariable DatabaseController::setUserMetadata(uint64_t userId, BaseLib:
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
+    catch(...)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
+    }
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+//}}}
+
+//{{{ User data
+BaseLib::PVariable DatabaseController::deleteUserData(uint64_t userId, const std::string& component, const std::string& key)
+{
+    try
+    {
+        BaseLib::Database::DataRow data;
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(userId));
+        if(_db.executeCommand("SELECT userID FROM users WHERE userID=?", data)->empty()) return BaseLib::Variable::createError(-1, "Unknown user.");
+
+        {
+            std::lock_guard<std::mutex> dataGuard(_dataMutex);
+            if(key.empty()) _data.erase(component);
+            else
+            {
+                auto dataIterator = _data.find(component);
+                if(dataIterator != _data.end()) dataIterator->second.erase(key);
+            }
+        }
+
+        data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(component)));
+        std::string command("DELETE FROM userData WHERE userID=? AND component=?");
+        if(!key.empty())
+        {
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(key)));
+            command.append(" AND key=?");
+        }
+        std::shared_ptr<BaseLib::IQueueEntry> entry = std::make_shared<QueueEntry>(command, data);
+        enqueue(0, entry);
+
+        return BaseLib::PVariable(new BaseLib::Variable(BaseLib::VariableType::tVoid));
+    }
+    catch(const std::exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4136,7 +3439,127 @@ BaseLib::PVariable DatabaseController::setUserMetadata(uint64_t userId, BaseLib:
     }
     return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
-//End users
+
+BaseLib::PVariable DatabaseController::getUserData(uint64_t userId, const std::string& component, const std::string& key)
+{
+    try
+    {
+        BaseLib::Database::DataRow data;
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(userId));
+        if(_db.executeCommand("SELECT userID FROM users WHERE userID=?", data)->empty()) return BaseLib::Variable::createError(-1, "Unknown user.");
+
+        BaseLib::PVariable value;
+
+        if(!key.empty())
+        {
+            std::lock_guard<std::mutex> dataGuard(_dataMutex);
+            auto componentIterator = _data.find(component);
+            if(componentIterator != _data.end())
+            {
+                auto keyIterator = componentIterator->second.find(key);
+                if(keyIterator != componentIterator->second.end())
+                {
+                    value = keyIterator->second;
+                    return value;
+                }
+            }
+        }
+
+        data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(component)));
+        std::string command;
+        if(!key.empty())
+        {
+            command = "SELECT value FROM userData WHERE userID=? AND component=? AND key=?";
+            data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(key)));
+        }
+        else command = "SELECT key, value FROM userData WHERE userID=? AND component=?";
+
+        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand(command, data);
+        if(rows->empty() || rows->at(0).empty()) return std::make_shared<BaseLib::Variable>();
+
+        if(key.empty())
+        {
+            value = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
+            for(auto& row : *rows)
+            {
+                value->structValue->emplace(row.second.at(0)->textValue, _rpcDecoder->decodeResponse(*row.second.at(1)->binaryValue));
+            }
+        }
+        else
+        {
+            value = _rpcDecoder->decodeResponse(*rows->at(0).at(0)->binaryValue);
+            std::lock_guard<std::mutex> dataGuard(_dataMutex);
+            _data[component][key] = value;
+        }
+
+        return value;
+    }
+    catch(const std::exception& ex)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+    }
+    catch(...)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
+    }
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+
+BaseLib::PVariable DatabaseController::setUserData(uint64_t userId, const std::string& component, const std::string& key, const BaseLib::PVariable& value)
+{
+    try
+    {
+        if(!value) return BaseLib::Variable::createError(-32602, "Could not parse data.");
+        if(component.empty()) return BaseLib::Variable::createError(-32602, "component is an empty string.");
+        if(key.empty()) return BaseLib::Variable::createError(-32602, "key is an empty string.");
+        if(component.size() > 250) return BaseLib::Variable::createError(-32602, "component has more than 250 characters.");
+        if(key.size() > 250) return BaseLib::Variable::createError(-32602, "key has more than 250 characters.");
+        //Don't check for type here, so base64, string and future data types that use stringValue are handled
+        if(value->type != BaseLib::VariableType::tBase64 && value->type != BaseLib::VariableType::tString && value->type != BaseLib::VariableType::tInteger && value->type != BaseLib::VariableType::tInteger64 && value->type != BaseLib::VariableType::tFloat && value->type != BaseLib::VariableType::tBoolean && value->type != BaseLib::VariableType::tStruct && value->type != BaseLib::VariableType::tArray) return BaseLib::Variable::createError(-32602, "Type " + BaseLib::Variable::getTypeString(value->type) + " is currently not supported.");
+
+        BaseLib::Database::DataRow data;
+        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(userId));
+        if(_db.executeCommand("SELECT userID FROM users WHERE userID=?", data)->empty()) return BaseLib::Variable::createError(-1, "Unknown user.");
+
+        std::shared_ptr<BaseLib::Database::DataTable> rows = _db.executeCommand("SELECT COUNT(*) FROM userData");
+        if(rows->size() == 0 || rows->at(0).size() == 0)
+        {
+            return BaseLib::Variable::createError(-32500, "Error counting data in database.");
+        }
+        if(rows->at(0).at(0)->intValue > 1000000)
+        {
+            return BaseLib::Variable::createError(-32500, "Reached limit of 1000000 data entries. Please delete data before adding new entries.");
+        }
+
+        {
+            std::lock_guard<std::mutex> dataGuard(_dataMutex);
+            _data[component][key] = value;
+        }
+
+        data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(component)));
+        data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(key)));
+        std::shared_ptr<BaseLib::IQueueEntry> entry = std::make_shared<QueueEntry>("DELETE FROM userData WHERE userID=? AND component=? AND key=?", data);
+        enqueue(0, entry);
+
+        std::vector<char> encodedValue;
+        _rpcEncoder->encodeResponse(value, encodedValue);
+        data.push_back(std::shared_ptr<BaseLib::Database::DataColumn>(new BaseLib::Database::DataColumn(encodedValue)));
+        entry = std::make_shared<QueueEntry>("INSERT INTO userData VALUES(?, ?, ?, ?)", data);
+        enqueue(0, entry);
+
+        return BaseLib::PVariable(new BaseLib::Variable(BaseLib::VariableType::tVoid));
+    }
+    catch(const std::exception& ex)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+    }
+    catch(...)
+    {
+        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
+    }
+    return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+//}}}
 
 //Groups
 BaseLib::PVariable DatabaseController::createGroup(BaseLib::PVariable translations, BaseLib::PVariable aclStruct)
@@ -4161,7 +3584,7 @@ BaseLib::PVariable DatabaseController::createGroup(BaseLib::PVariable translatio
         }
         catch(BaseLib::Security::AclException& ex)
         {
-            return BaseLib::Variable::createError(-1, "Error in ACL: " + ex.what());
+            return BaseLib::Variable::createError(-1, "Error in ACL: " + std::string(ex.what()));
         }
 
         std::vector<char> aclBlob;
@@ -4177,10 +3600,6 @@ BaseLib::PVariable DatabaseController::createGroup(BaseLib::PVariable translatio
         return std::make_shared<BaseLib::Variable>(result);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4209,10 +3628,6 @@ BaseLib::PVariable DatabaseController::deleteGroup(uint64_t groupId)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4235,10 +3650,6 @@ BaseLib::PVariable DatabaseController::getAcl(uint64_t groupId)
         return acls;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4283,10 +3694,6 @@ BaseLib::PVariable DatabaseController::getGroup(uint64_t groupId, std::string la
         return group;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4337,10 +3744,6 @@ BaseLib::PVariable DatabaseController::getGroups(std::string languageCode)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4357,10 +3760,6 @@ bool DatabaseController::groupExists(uint64_t groupId)
         return !_db.executeCommand("SELECT id FROM groups WHERE id=?", data)->empty();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4389,7 +3788,7 @@ BaseLib::PVariable DatabaseController::updateGroup(uint64_t groupId, BaseLib::PV
         }
         catch(BaseLib::Security::AclException& ex)
         {
-            return BaseLib::Variable::createError(-1, "Error in ACL: " + ex.what());
+            return BaseLib::Variable::createError(-1, "Error in ACL: " + std::string(ex.what()));
         }
 
         std::vector<char> aclBlob;
@@ -4406,10 +3805,6 @@ BaseLib::PVariable DatabaseController::updateGroup(uint64_t groupId, BaseLib::PV
         return std::make_shared<BaseLib::Variable>();
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4430,10 +3825,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getEvents()
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4469,10 +3860,6 @@ void DatabaseController::deleteEvent(std::string& name)
         enqueue(0, entry);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4550,10 +3937,6 @@ void DatabaseController::saveFamilyVariableAsynchronous(int32_t familyId, BaseLi
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4570,10 +3953,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getFamilyVaria
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4618,10 +3997,6 @@ void DatabaseController::deleteFamilyVariable(BaseLib::Database::DataRow& data)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4640,10 +4015,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getDevices(uin
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4669,10 +4040,6 @@ void DatabaseController::deleteDevice(uint64_t id)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4694,10 +4061,6 @@ uint64_t DatabaseController::saveDevice(uint64_t id, int32_t address, std::strin
         return (uint64_t)result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4766,10 +4129,6 @@ void DatabaseController::saveDeviceVariableAsynchronous(BaseLib::Database::DataR
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4786,10 +4145,6 @@ void DatabaseController::deletePeers(int32_t deviceID)
         enqueue(0, entry);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4812,10 +4167,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getPeers(uint6
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4833,10 +4184,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getDeviceVaria
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -4867,10 +4214,6 @@ void DatabaseController::deletePeer(uint64_t id)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4879,31 +4222,16 @@ void DatabaseController::deletePeer(uint64_t id)
 
 uint64_t DatabaseController::savePeer(uint64_t id, uint32_t parentID, int32_t address, std::string& serialNumber, uint32_t type)
 {
-    try
-    {
-        BaseLib::Database::DataRow data;
-        if(id > 0) data.push_back(std::make_shared<BaseLib::Database::DataColumn>(id));
-        else data.push_back(std::make_shared<BaseLib::Database::DataColumn>());
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(parentID));
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(address));
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(serialNumber));
-        data.push_back(std::make_shared<BaseLib::Database::DataColumn>(type));
-        uint64_t result = _db.executeWriteCommand("REPLACE INTO peers VALUES(?, ?, ?, ?, ?)", data);
-        return result;
-    }
-    catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(...)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-    }
-    return 0;
+    BaseLib::Database::DataRow data;
+    if(id > 0) data.push_back(std::make_shared<BaseLib::Database::DataColumn>(id));
+    else data.push_back(std::make_shared<BaseLib::Database::DataColumn>());
+    data.push_back(std::make_shared<BaseLib::Database::DataColumn>(parentID));
+    data.push_back(std::make_shared<BaseLib::Database::DataColumn>(address));
+    data.push_back(std::make_shared<BaseLib::Database::DataColumn>(serialNumber));
+    data.push_back(std::make_shared<BaseLib::Database::DataColumn>(type));
+    uint64_t result = _db.executeWriteCommand("REPLACE INTO peers VALUES(?, ?, ?, ?, ?)", data);
+    if(result == 0) throw BaseLib::Exception("Error saving peer to database. See previous errors in log for more information.");
+    return result;
 }
 
 void DatabaseController::savePeerParameterAsynchronous(BaseLib::Database::DataRow& data)
@@ -4946,10 +4274,6 @@ void DatabaseController::savePeerParameterAsynchronous(BaseLib::Database::DataRo
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -4971,10 +4295,6 @@ void DatabaseController::saveSpecialPeerParameterAsynchronous(BaseLib::Database:
         enqueue(0, entry);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5003,10 +4323,6 @@ void DatabaseController::savePeerParameterRoomAsynchronous(BaseLib::Database::Da
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5032,10 +4348,6 @@ void DatabaseController::savePeerParameterCategoriesAsynchronous(BaseLib::Databa
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5058,10 +4370,6 @@ void DatabaseController::savePeerParameterRolesAsynchronous(BaseLib::Database::D
         }
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5129,10 +4437,6 @@ void DatabaseController::savePeerVariableAsynchronous(BaseLib::Database::DataRow
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5149,10 +4453,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getPeerParamet
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5173,10 +4473,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getPeerVariabl
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5221,10 +4517,6 @@ void DatabaseController::deletePeerParameter(uint64_t peerID, BaseLib::Database:
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5255,9 +4547,12 @@ bool DatabaseController::setPeerID(uint64_t oldPeerID, uint64_t newPeerID)
         enqueue(0, entry);
         entry = std::make_shared<QueueEntry>("UPDATE events SET peerID=? WHERE peerID=?", data);
         enqueue(0, entry);
-        _metadataMutex.lock();
-        _metadata.erase(oldPeerID);
-        _metadataMutex.unlock();
+
+        {
+            std::lock_guard<std::mutex> metadataGuard(_metadataMutex);
+            _metadata.erase(oldPeerID);
+        }
+
         data.clear();
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(std::to_string(newPeerID)));
         data.push_back(std::make_shared<BaseLib::Database::DataColumn>(std::to_string(oldPeerID)));
@@ -5266,10 +4561,6 @@ bool DatabaseController::setPeerID(uint64_t oldPeerID, uint64_t newPeerID)
         return true;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5292,10 +4583,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getServiceMess
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5371,10 +4658,6 @@ void DatabaseController::saveServiceMessageAsynchronous(uint64_t peerID, BaseLib
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5396,10 +4679,6 @@ void DatabaseController::saveGlobalServiceMessageAsynchronous(BaseLib::Database:
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5417,10 +4696,6 @@ void DatabaseController::deleteServiceMessage(uint64_t databaseID)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5435,10 +4710,6 @@ void DatabaseController::deleteGlobalServiceMessage(int32_t familyId, int32_t me
         _db.executeCommand("DELETE FROM serviceMessages WHERE familyID=? AND messageID=? AND messageSubID=? AND message=?", data);
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5460,10 +4731,6 @@ std::shared_ptr<BaseLib::Database::DataTable> DatabaseController::getLicenseVari
         return result;
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -5532,10 +4799,6 @@ void DatabaseController::saveLicenseVariable(int32_t moduleId, BaseLib::Database
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
-    catch(BaseLib::Exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
     catch(...)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -5549,10 +4812,6 @@ void DatabaseController::deleteLicenseVariable(int32_t moduleId, uint64_t mapKey
         _db.executeCommand("DELETE FROM licenseVariables WHERE variableIndex=" + std::to_string(mapKey));
     }
     catch(const std::exception& ex)
-    {
-        GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }

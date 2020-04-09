@@ -415,14 +415,6 @@ std::string CliServer::userCommand(std::string& command)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 	return "Error executing command. See log file for more details.\n";
 }
 
@@ -655,14 +647,6 @@ std::string CliServer::moduleCommand(std::string& command)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 	return "Error executing command. See log file for more details.\n";
 }
 
@@ -684,6 +668,7 @@ BaseLib::PVariable CliServer::generalCommand(std::string& command)
 			stringStream << "lifetick (lt)        Checks the lifeticks of all components." << std::endl;
 			stringStream << "rpcservers (rpc)     Lists all active RPC servers" << std::endl;
 			stringStream << "rpcclients (rcl)     Lists all active RPC clients" << std::endl;
+            stringStream << "reloadroles (rrl)    Delete all roles and recreate them from \"defaultRoles.json\"." << std::endl;
 			stringStream << "threads              Prints current thread count" << std::endl;
 #ifndef NO_SCRIPTENGINE
 			stringStream << "runscript (rs)       Executes a script with the internal PHP engine" << std::endl;
@@ -913,6 +898,23 @@ BaseLib::PVariable CliServer::generalCommand(std::string& command)
 
 			return std::make_shared<BaseLib::Variable>(stringStream.str());
 		}
+        else if(BaseLib::HelperFunctions::checkCliCommand(command, "reloadroles", "rrl", "", 0, arguments, showHelp))
+        {
+            if(showHelp)
+            {
+                stringStream
+                        << "Description: Deletes all existing roles and recreates them from \"defaultRoles.json\"."
+                        << std::endl;
+                stringStream << "Usage: reloadroles" << std::endl << std::endl;
+                return std::make_shared<BaseLib::Variable>(stringStream.str());
+            }
+
+            GD::bl->db->deleteAllRoles();
+            GD::bl->db->createDefaultRoles();
+
+            stringStream << "Recreating roles... Please check the Homegear log for errors." << std::endl;
+            return std::make_shared<BaseLib::Variable>(stringStream.str());
+        }
 		else if(command.compare(0, 10, "rpcclients") == 0 || command.compare(0, 3, "rcl") == 0)
 		{
 			std::stringstream stream(command);
@@ -1116,7 +1118,6 @@ BaseLib::PVariable CliServer::generalCommand(std::string& command)
 			int32_t exitCode = 0;
 			try
 			{
-
 				if(!GD::rpcClient->lifetick())
 				{
 					stringStream << "RPC Client: Failed" << std::endl;
@@ -1144,16 +1145,6 @@ BaseLib::PVariable CliServer::generalCommand(std::string& command)
 			{
 				exitCode = 127;
 				GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-			}
-			catch(BaseLib::Exception& ex)
-			{
-				exitCode = 127;
-				GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-			}
-			catch(...)
-			{
-				exitCode = 127;
-				GD::bl->out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 			}
 			auto output = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
 			output->structValue->emplace("exitCode", std::make_shared<BaseLib::Variable>(exitCode));
@@ -1202,14 +1193,6 @@ BaseLib::PVariable CliServer::generalCommand(std::string& command)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 	return std::make_shared<BaseLib::Variable>(std::string("Error executing command. See log file for more details.\n"));
 }
 
@@ -1227,14 +1210,6 @@ std::string CliServer::familyCommand(int32_t familyId, std::string& command)
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 	return "Error executing command. See log file for more details.\n";
 }
@@ -1263,17 +1238,10 @@ std::string CliServer::peerCommand(uint64_t peerId, std::string& command)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 	return "Error executing command. See log file for more details.\n";
 }
 
+#ifndef NO_SCRIPTENGINE
 void CliServer::scriptFinished(BaseLib::ScriptEngine::PScriptInfo& scriptInfo, int32_t exitCode)
 {
 	try
@@ -1286,14 +1254,6 @@ void CliServer::scriptFinished(BaseLib::ScriptEngine::PScriptInfo& scriptInfo, i
 	catch(const std::exception& ex)
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
 	}
 }
 
@@ -1316,14 +1276,7 @@ void CliServer::scriptOutput(PScriptInfo& scriptInfo, std::string& output, bool 
 	{
 		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
 	}
-	catch(BaseLib::Exception& ex)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-	}
-	catch(...)
-	{
-		GD::out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
-	}
 }
+#endif
 
 }

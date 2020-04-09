@@ -28,17 +28,13 @@ void RestServer::getError(int32_t code, std::string codeDescription, std::string
     try
     {
         std::vector<std::string> additionalHeaders;
-        std::string contentString = "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\"><html><head><title>" + std::to_string(code) + " " + codeDescription + "</title></head><body><h1>" + codeDescription + "</h1><p>" + longDescription + "<br/></p><hr><address>Homegear " + VERSION + " at Port " + std::to_string(_serverInfo->port) + "</address></body></html>";
+        std::string contentString = "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\"><html><head><title>" + std::to_string(code) + " " + codeDescription + "</title></head><body><h1>" + codeDescription + "</h1><p>" + longDescription + "<br/></p><hr><address>Homegear " + GD::homegearVersion + " at Port " + std::to_string(_serverInfo->port) + "</address></body></html>";
         std::string header;
         _http.constructHeader(contentString.size(), "text/html", code, codeDescription, additionalHeaders, header);
         content.insert(content.end(), header.begin(), header.end());
         content.insert(content.end(), contentString.begin(), contentString.end());
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -52,17 +48,13 @@ void RestServer::getError(int32_t code, std::string codeDescription, std::string
 {
     try
     {
-        std::string contentString = "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\"><html><head><title>" + std::to_string(code) + " " + codeDescription + "</title></head><body><h1>" + codeDescription + "</h1><p>" + longDescription + "<br/></p><hr><address>Homegear " + VERSION + " at Port " + std::to_string(_serverInfo->port) + "</address></body></html>";
+        std::string contentString = "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\"><html><head><title>" + std::to_string(code) + " " + codeDescription + "</title></head><body><h1>" + codeDescription + "</h1><p>" + longDescription + "<br/></p><hr><address>Homegear " + GD::homegearVersion + " at Port " + std::to_string(_serverInfo->port) + "</address></body></html>";
         std::string header;
         _http.constructHeader(contentString.size(), "text/html", code, codeDescription, additionalHeaders, header);
         content.insert(content.end(), header.begin(), header.end());
         content.insert(content.end(), contentString.begin(), contentString.end());
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }
@@ -277,9 +269,9 @@ void RestServer::process(BaseLib::PRpcClientInfo clientInfo, BaseLib::Http& http
             {
                 json = _jsonDecoder->decode(http.getContent());
             }
-            catch(BaseLib::Exception& ex)
+            catch(std::exception& ex)
             {
-                getError(500, "Server error", "Could not decode JSON: " + ex.what(), content);
+                getError(500, "Server error", std::string("Could not decode JSON: ") + ex.what(), content);
                 send(socket, content);
                 return;
             }
@@ -357,12 +349,6 @@ void RestServer::process(BaseLib::PRpcClientInfo clientInfo, BaseLib::Http& http
         getError(500, "Server error", ex.what(), content);
         send(socket, content);
     }
-    catch(BaseLib::Exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-        getError(500, "Server error", ex.what(), content);
-        send(socket, content);
-    }
     catch(...)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__);
@@ -382,19 +368,15 @@ void RestServer::send(std::shared_ptr<BaseLib::TcpSocket>& socket, std::vector<c
         }
         catch(BaseLib::SocketDataLimitException& ex)
         {
-            _out.printWarning("Warning: " + ex.what());
+            _out.printWarning(std::string("Warning: ") + ex.what());
         }
         catch(const BaseLib::SocketOperationException& ex)
         {
-            _out.printInfo("Info: " + ex.what());
+            _out.printInfo(std::string("Info: ") + ex.what());
         }
         socket->close();
     }
     catch(const std::exception& ex)
-    {
-        _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
-    }
-    catch(BaseLib::Exception& ex)
     {
         _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
     }

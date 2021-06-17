@@ -35,6 +35,7 @@
 #include "../RPC/RpcMethods/UiNotificationsRpcMethods.h"
 #include "../RPC/RpcMethods/VariableProfileRpcMethods.h"
 #include "../RPC/RpcMethods/NodeBlueRpcMethods.h"
+#include "../RPC/RpcMethods/MaintenanceRpcMethods.h"
 #include "FlowParser.h"
 
 #include <homegear-base/BaseLib.h>
@@ -315,6 +316,11 @@ NodeBlueServer::NodeBlueServer() : IQueue(GD::bl.get(), 3, 100000) {
   _rpcMethods.emplace("updateVariableProfile", std::static_pointer_cast<BaseLib::Rpc::RpcMethod>(std::make_shared<RpcMethods::RpcUpdateVariableProfile>()));
   //}}}
 
+  { // Maintenance
+    _rpcMethods.emplace("enableMaintenanceMode", std::make_shared<RpcMethods::RpcEnableMaintenanceMode>());
+    _rpcMethods.emplace("disableMaintenanceMode", std::make_shared<RpcMethods::RpcDisableMaintenanceMode>());
+  }
+
 #ifndef NO_SCRIPTENGINE
   _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(PNodeBlueClientData &clientData, BaseLib::PArray &parameters)>>("executePhpNode",
                                                                                                                                                   std::bind(&NodeBlueServer::executePhpNode, this, std::placeholders::_1, std::placeholders::_2)));
@@ -340,6 +346,8 @@ NodeBlueServer::NodeBlueServer() : IQueue(GD::bl.get(), 3, 100000) {
                                                                                                                                                   std::bind(&NodeBlueServer::nodeBlueVariableEvent, this, std::placeholders::_1, std::placeholders::_2)));
   _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(PNodeBlueClientData &clientData, BaseLib::PArray &parameters)>>("nodeRedNodeInput",
                                                                                                                                                   std::bind(&NodeBlueServer::nodeRedNodeInput, this, std::placeholders::_1, std::placeholders::_2)));
+  _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(PNodeBlueClientData &clientData, BaseLib::PArray &parameters)>>("registerUiNodeRoles",
+                                                                                                                                                  std::bind(&NodeBlueServer::registerUiNodeRoles, this, std::placeholders::_1, std::placeholders::_2)));
   _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(PNodeBlueClientData &clientData, BaseLib::PArray &parameters)>>("setCredentials",
                                                                                                                                                   std::bind(&NodeBlueServer::setCredentials, this, std::placeholders::_1, std::placeholders::_2)));
   _localRpcMethods.insert(std::pair<std::string, std::function<BaseLib::PVariable(PNodeBlueClientData &clientData, BaseLib::PArray &parameters)>>("setCredentialTypes",
@@ -1638,6 +1646,24 @@ void NodeBlueServer::restartFlows() {
   _flowsRestarting = false;
 }
 
+void NodeBlueServer::stopFlows() {
+  try {
+    std::lock_guard<std::mutex> restartFlowsGuard(_restartFlowsMutex);
+    stopNodes();
+    bool result = sendReset();
+    if (!result) {
+      _out.printInfo("Info: Stopping Flows...");
+      sendShutdown();
+      _out.printInfo("Info: Closing connections to Flows clients...");
+      closeClientConnections();
+    }
+  }
+  catch (const std::exception &ex) {
+    _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+  }
+  _flowsRestarting = false;
+}
+
 bool NodeBlueServer::restartFlowsAsync() {
   try {
     if (_flowsRestarting) return false;
@@ -1858,6 +1884,9 @@ std::string NodeBlueServer::handleGet(std::string &path, BaseLib::Http &http, st
         if (BaseLib::Io::fileExists(path)) contentString = BaseLib::Io::getFileContent(path);
       }
       responseEncoding = "application/json";
+    } else if (path == "node-blue/plugins") {
+      responseEncoding = "application/json";
+      contentString = "{}";
     } else if (path == "node-blue/nodes") {
       if (!loginValid) return "unauthorized";
       path = _webroot + "static/" + path.substr(10);
@@ -1883,6 +1912,8 @@ std::string NodeBlueServer::handleGet(std::string &path, BaseLib::Http &http, st
         newPath = _webroot + "icons/" + pathPair.second;
         if (BaseLib::Io::fileExists(newPath)) contentString = BaseLib::Io::getFileContent(newPath);
       }
+      auto filePair = BaseLib::HelperFunctions::splitLast(pathPair.second, '.');
+      if (!filePair.second.empty()) responseEncoding = http.getMimeType(filePair.second);
     } else if (path.compare(0, 30, "node-blue/library/local/flows/") == 0 || path.compare(0, 35, "node-blue/library/_examples_/flows/") == 0) {
       if (!loginValid) return "unauthorized";
 
@@ -2484,6 +2515,49 @@ std::string NodeBlueServer::handlePut(std::string &path, BaseLib::Http &http, st
   }
   return "";
 #endif
+}
+
+BaseLib::PVariable NodeBlueServer::getVariablesInRole(BaseLib::PRpcClientInfo clientInfo, uint64_t roleId, uint64_t peerId) {
+  try {
+    auto inputChannels = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
+    auto outputChannels = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
+    std::lock_guard<std::mutex> nodeInfoGuard(_nodeInfoMapMutex);
+    for (auto &nodeInfo : _nodeInfoMap) {
+      if (peerId == 0 || peerId == 0x50000001) {
+        for (auto &output : nodeInfo.second.outputRoles) {
+          if (output.second == roleId) {
+            if (!clientInfo->acls->checkNodeBlueVariableWriteAccess(nodeInfo.first, output.first)) continue;
+
+            auto channelIterator = outputChannels->structValue->find(std::to_string(output.first));
+            if (channelIterator == outputChannels->structValue->end()) {
+              auto result = outputChannels->structValue->emplace(std::to_string(output.first), std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct));
+              if (!result.second) continue;
+              channelIterator = result.first;
+            }
+
+            auto roleStruct = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
+
+            roleStruct->structValue->emplace("direction", std::make_shared<BaseLib::Variable>((int32_t)BaseLib::RoleDirection::output));
+            roleStruct->structValue->emplace("level", std::make_shared<BaseLib::Variable>((roleId / 10000) * 10000 == roleId ? 0 : ((roleId / 100) * 100 == roleId ? 1 : 2)));
+
+            channelIterator->second->structValue->emplace(nodeInfo.first, roleStruct);
+          }
+        }
+      }
+    }
+
+    if (peerId != 0) {
+      return outputChannels;
+    } else {
+      auto devices = std::make_shared<BaseLib::Variable>(BaseLib::VariableType::tStruct);
+      if (!outputChannels->structValue->empty()) devices->structValue->emplace(std::to_string(0x50000001), outputChannels);
+      return devices;
+    }
+  }
+  catch (const std::exception &ex) {
+    _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+  }
+  return BaseLib::Variable::createError(-32500, "Unknown application error.");
 }
 
 uint32_t NodeBlueServer::flowCount() {
@@ -3702,7 +3776,7 @@ BaseLib::PVariable NodeBlueServer::addNodesToFlow(const std::string &tab, const 
       std::lock_guard<std::mutex> flowsFileGuard(_flowsFileMutex);
       if (BaseLib::Io::fileExists(flowsFile)) fileContent = BaseLib::Io::getBinaryFileContent(flowsFile);
       else {
-        std::string tempString = R"([{"id":")" + FlowParser::generateRandomId() + R"(","label":"Flow 1","type":"tab"}])";
+        std::string tempString = R"([])";
         fileContent.insert(fileContent.end(), tempString.begin(), tempString.end());
       }
     }
@@ -4102,6 +4176,33 @@ BaseLib::PVariable NodeBlueServer::nodeRedNodeInput(PNodeBlueClientData &clientD
     if (parameters->size() != 5) return BaseLib::Variable::createError(-1, "Method expects exactly four parameters.");
 
     _nodepink->nodeInput(parameters->at(0)->stringValue, parameters->at(1), parameters->at(2)->integerValue, parameters->at(3), parameters->at(4)->booleanValue);
+    return std::make_shared<BaseLib::Variable>();
+  }
+  catch (const std::exception &ex) {
+    _out.printEx(__FILE__, __LINE__, __PRETTY_FUNCTION__, ex.what());
+  }
+  return BaseLib::Variable::createError(-32500, "Unknown application error.");
+}
+
+BaseLib::PVariable NodeBlueServer::registerUiNodeRoles(PNodeBlueClientData &clientData, BaseLib::PArray &parameters) {
+  try {
+    if (parameters->size() != 2) return BaseLib::Variable::createError(-1, "Method expects exactly two parameters.");
+    if (parameters->at(0)->type != BaseLib::VariableType::tString) return BaseLib::Variable::createError(-1, "First parameter is not of type String.");
+    if (parameters->at(1)->type != BaseLib::VariableType::tStruct) return BaseLib::Variable::createError(-1, "Second parameter is not of type Struct.");
+
+    auto nodeId = parameters->at(0)->stringValue;
+    auto roles = parameters->at(1)->structValue;
+
+    std::lock_guard<std::mutex> nodeInfoGuard(_nodeInfoMapMutex);
+    auto nodeInfoIterator = _nodeInfoMap.find(nodeId);
+    if (nodeInfoIterator == _nodeInfoMap.end()) return std::make_shared<BaseLib::Variable>();
+
+    for (auto &role : *roles) {
+      if (role.first.at(0) == 'o') {
+        nodeInfoIterator->second.outputRoles.emplace(BaseLib::Math::getUnsignedNumber(role.first.substr(1)), role.second->integerValue);
+      }
+    }
+
     return std::make_shared<BaseLib::Variable>();
   }
   catch (const std::exception &ex) {

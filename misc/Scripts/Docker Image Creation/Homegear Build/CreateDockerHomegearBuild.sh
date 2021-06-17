@@ -157,7 +157,13 @@ rm $rootfs/Release.key
 
 DEBIAN_FRONTEND=noninteractive chroot $rootfs apt-get update
 # python: Needed by homegear-ui's npm on some systems
-DEBIAN_FRONTEND=noninteractive chroot $rootfs apt-get -y install ssh wget unzip binutils debhelper devscripts automake autoconf libtool sqlite3 libsqlite3-dev libncurses5-dev libssl-dev libparse-debcontrol-perl libgpg-error-dev php8-homegear-dev nodejs-homegear libxslt1-dev libedit-dev libqdbm-dev libcrypto++-dev libltdl-dev zlib1g-dev libtinfo-dev libgmp-dev libxml2-dev libzip-dev p7zip-full ntp libavahi-common-dev libavahi-client-dev libicu-dev libonig-dev libsodium-dev libpython3-dev python3-all python3-setuptools dh-python uuid-dev libgpgme-dev
+DEBIAN_FRONTEND=noninteractive chroot $rootfs apt-get -y install ssh wget unzip binutils debhelper devscripts automake autoconf libtool cmake sqlite3 libsqlite3-dev libncurses5-dev libssl-dev libparse-debcontrol-perl libgpg-error-dev php8-homegear-dev nodejs-homegear libxslt1-dev libedit-dev libqdbm-dev libcrypto++-dev libltdl-dev zlib1g-dev libtinfo-dev libgmp-dev libxml2-dev libzip-dev p7zip-full ntp libavahi-common-dev libavahi-client-dev libicu-dev libonig-dev libsodium-dev libpython3-dev python3-all python3-setuptools dh-python uuid-dev libgpgme-dev
+
+# {{{ Packages for doorctrl
+if [ "$dist" == "Raspbian" ] && [ "$distver" == "bullseye" ]; then
+  DEBIAN_FRONTEND=noninteractive chroot $rootfs apt-get -y install libasound2-dev libboost-dev libboost-thread-dev libboost-log-dev libboost-system-dev libboost-program-options-dev libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad libavdevice58 libsdl2-2.0-0 libsdl2-2.0-0 libsdl2-2.0-0 libopencore-amrnb0 libopencore-amrwb0 libgpiod-dev libssl-dev libxss-dev
+fi
+# }}}
 
 if [ "$distver" == "bullseye" ]; then
 	DEBIAN_FRONTEND=noninteractive chroot $rootfs apt-get -y install libenchant-2-dev
@@ -198,6 +204,12 @@ fi
 DEBIAN_FRONTEND=noninteractive chroot $rootfs apt-get -y install php-cli
 # }}}
 
+# {{{ PJPROJECT for doorctrl
+if [ "$dist" == "Raspbian" ] && [ "$distver" == "bullseye" ]; then
+  DEBIAN_FRONTEND=noninteractive chroot $rootfs /bin/bash -c 'cd /usr/src && wget https://github.com/pjsip/pjproject/archive/refs/tags/2.11.tar.gz && tar -zxf 2.11.tar.gz && rm 2.11.tar.gz && cd /usr/src/pjproject-2.11 && ./configure && make dep && make && make install'
+fi
+# }}}
+
 mkdir $rootfs/build
 cat > "$rootfs/build/CreateDebianPackage.sh" <<-'EOF'
 #!/bin/bash
@@ -219,7 +231,9 @@ function createPackage {
 	[ $? -ne 0 ] && exit 1
 	cd $sourcePath
 	[ $? -ne 0 ] && exit 1
-	./bootstrap
+	if [ -f ./bootstrap ]; then
+	  ./bootstrap
+	fi
 	[ $? -ne 0 ] && exit 1
 	cd ..
 	if [ "$distribution" == "Debian" ]; then
@@ -239,7 +253,7 @@ function createPackage {
 
   * See https://github.com/Homegear/${1}/issues?q=is%3Aissue+is%3Aclosed
 
- -- Sathya Laufer <sathya@laufers.net>  $date" > $sourcePath/debian/changelog
+ -- Dr. Sathya Laufer <s.laufer@homegear.email>  $date" > $sourcePath/debian/changelog
 	tar -zcpf ${3}_$version.orig.tar.gz $sourcePath
 	[ $? -ne 0 ] && exit 1
 	cd $sourcePath
@@ -614,6 +628,22 @@ if [[ -n $2 ]]; then
 	[ $? -ne 0 ] && exit 1
 	rm ${1}.zip
 	mv ibs-ssh-${1}* ibs-ssh-${1}
+
+  if [ "$distribution" == "Raspbian" ] && [ "$distributionVersion" == "bullseye" ]; then
+    wget --https-only https://gitit.de/api/v4/projects/138/repository/archive.zip?sha=${1}\&private_token=${2} -O ${1}.zip
+    [ $? -ne 0 ] && exit 1
+    unzip ${1}.zip
+    [ $? -ne 0 ] && exit 1
+    rm ${1}.zip
+    mv doorctrl-${1}* doorctrl-${1}
+
+    wget --https-only https://gitit.de/api/v4/projects/332/repository/archive.zip?sha=${1}\&private_token=${2} -O ${1}.zip
+    [ $? -ne 0 ] && exit 1
+    unzip ${1}.zip
+    [ $? -ne 0 ] && exit 1
+    rm ${1}.zip
+    mv ltp08-connector-${1}* ltp08-connector-${1}
+	fi
 fi
 
 createPackage libhomegear-base $1 libhomegear-base 0
@@ -723,6 +753,10 @@ if [[ -n $2 ]]; then
 	createPackage mellonbot $1 mellonbot 1
 	createPackage homegear-cloudconnect $1 homegear-cloudconnect 1
 	createPackage ibs-ssh $1 ibs-ssh 1
+	if [ "$distribution" == "Raspbian" ] && [ "$distributionVersion" == "bullseye" ]; then
+	  createPackage doorctrl $1 doorctrl 1
+	  createPackage ltp08-connector $1 ltp08-connector 1
+	fi
 fi
 EOF
 chmod 755 $rootfs/build/CreateDebianPackage.sh
@@ -823,6 +857,9 @@ if [[ -n $1 ]]; then
 	cleanUp2 mellonbot
 	cleanUp2 homegear-cloudconnect
 	cleanUp2 ibs-ssh
+	cleanUp2 doorctrl
+	cleanUp2 doorbell
+	cleanUp2 ltp08-connector
 fi
 EOF
 echo "isodate=\`date +%Y%m%d\`
@@ -878,6 +915,9 @@ echo "isodate=\`date +%Y%m%d\`
 		mv mellonbot.deb mellonbot_\$[isodate]_${distlc}_${distver}_${arch}.deb
 		mv homegear-cloudconnect.deb homegear-cloudconnect_\$[isodate]_${distlc}_${distver}_${arch}.deb
 		mv ibs-ssh.deb ibs-ssh_\$[isodate]_${distlc}_${distver}_${arch}.deb
+		mv doorctrl.deb doorctrl_\$[isodate]_${distlc}_${distver}_${arch}.deb
+		mv doorbell.deb doorbell_\$[isodate]_${distlc}_${distver}_${arch}.deb
+		mv ltp08-connector.deb ltp08-connector_\$[isodate]_${distlc}_${distver}_${arch}.deb
 	fi
 	if test -f /build/UploadNightly.sh; then
 		/build/UploadNightly.sh
@@ -975,7 +1015,7 @@ cd /build
 if [ \$(ls /build | grep -c \"\\.changes\$\") -ne 0 ]; then
 	path=\`mktemp -p / -u\`".tar.gz"
 	echo \"<DIST>\" > distribution
-	tar -zcpf \${path} homegear* lib* ibs-ssh* mellon* python3-homegear* distribution
+	tar -zcpf \${path} homegear* lib* doorbell* doorctrl* ltp08* ibs-ssh* mellon* python3-homegear* distribution
 	if test -f \${path}; then
 		mv \${path} \${path}.uploading
 		filename=\$(basename \$path)

@@ -53,6 +53,7 @@
 #include <malloc.h>
 
 #include <cmath>
+#include <memory>
 #include <vector>
 #include <memory>
 #include <algorithm>
@@ -590,11 +591,11 @@ void startUp() {
     if (databasePath.empty()) databasePath = GD::bl->settings.dataPath();
     std::string databaseBackupPath = GD::bl->settings.databaseBackupPath();
     if (databaseBackupPath.empty()) databaseBackupPath = GD::bl->settings.dataPath();
-    GD::bl->db->open(databasePath, "db.sql", GD::bl->settings.databaseSynchronous(), GD::bl->settings.databaseMemoryJournal(), GD::bl->settings.databaseWALJournal(), databaseBackupPath, "db.sql.bak");
+    GD::bl->db->open(databasePath, "db.sql", GD::bl->settings.factoryDatabasePath(), GD::bl->settings.databaseSynchronous(), GD::bl->settings.databaseMemoryJournal(), GD::bl->settings.databaseWALJournal(), databaseBackupPath, GD::bl->settings.factoryDatabaseBackupPath(), "db.sql.bak");
     if (!GD::bl->db->isOpen()) exitHomegear(1);
 
     GD::out.printInfo("Initializing database...");
-    if (GD::bl->db->convertDatabase()) exitHomegear(0);
+    if (GD::bl->db->convertDatabase(databasePath, "db.sql", GD::bl->settings.factoryDatabasePath(), GD::bl->settings.databaseSynchronous(), GD::bl->settings.databaseMemoryJournal(), GD::bl->settings.databaseWALJournal(), databaseBackupPath, GD::bl->settings.factoryDatabaseBackupPath(), "db.sql.bak")) exitHomegear(0);
     GD::bl->db->initializeDatabase();
 
     {
@@ -708,7 +709,7 @@ void startUp() {
     GD::licensingController->loadModules();
 
     GD::out.printInfo("Initializing system variable controller...");
-    GD::systemVariableController.reset(new SystemVariableController());
+    GD::systemVariableController = std::make_unique<SystemVariableController>();
 
     GD::familyController->init();
     GD::familyController->loadModules();
@@ -903,13 +904,13 @@ void startUp() {
     {
       uint32_t maxWait = GD::bl->settings.maxWaitForPhysicalInterfaces();
       if (maxWait < 1) maxWait = 1;
-      for (int32_t i = 0; i < (signed)maxWait; i++) {
+      for (uint32_t i = 0; i < maxWait; i++) {
         if (GD::bl->debugLevel >= 4 && i % 10 == 0) GD::out.printInfo("Info: Waiting for physical interfaces to connect (" + std::to_string(i) + " of 180s" + ").");
         if (GD::familyController->physicalInterfaceIsOpen()) {
           GD::out.printMessage("All physical interfaces are connected now.");
           break;
         }
-        if (i == 299) GD::out.printError("Error: At least one physical interface is not connected.");
+        if (i == GD::bl->settings.maxWaitForPhysicalInterfaces() - 1) GD::out.printError("Error: At least one physical interface is not connected.");
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
       }
     }
